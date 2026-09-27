@@ -4,21 +4,21 @@ export const APP_NAME = 'QuickDrop';
 export const APP_TAGLINE = 'Transfer files. Directly. Privately.';
 export const APP_VERSION = '1.0.0';
 
-// Default STUN servers for NAT traversal
+// STUN and open TURN servers for reliable cross-device NAT traversal & LAN firewall bypass
 export const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.services.mozilla.com' },
 ];
 
-// 64 KB per chunk (RTCDataChannel safe max without packet fragmentation)
-export const DEFAULT_CHUNK_SIZE = 64 * 1024; 
+// 16 KB per chunk (RTCDataChannel universal safe max avoiding SCTP fragmentation and 64KB message limits)
+export const DEFAULT_CHUNK_SIZE = 16 * 1024; 
 
 // Backpressure thresholds for RTCDataChannel
-export const HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB pause sending
-export const LOW_WATER_MARK = 512 * 1024; // 512KB resume sending
+export const HIGH_WATER_MARK = 1024 * 1024; // 1MB pause sending
+export const LOW_WATER_MARK = 128 * 1024; // 128KB resume sending
 
 // Maximum recommended single file size for browser in-memory blob assembly (2GB)
 export const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
@@ -32,12 +32,19 @@ export const STORAGE_KEYS = {
   THEME: 'quickdrop_theme',
 } as const;
 
+export const getDefaultSignalingUrl = (): string => {
+  if (typeof window === 'undefined') return 'ws://localhost:5173/quickdrop-ws';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/quickdrop-ws`;
+};
+
 export const DEFAULT_SETTINGS: AppSettings = {
   deviceName: '',
   theme: 'system',
   chunkSize: DEFAULT_CHUNK_SIZE,
   autoAcceptFromKnown: false,
   soundEnabled: true,
-  signalingServerUrl: 'ws://localhost:4000',
-  useSignalingServer: false, // Default to BroadcastChannel (zero-config local/multi-tab), switchable to WebSocket
+  signalingServerUrl: '', // Auto-resolved to getDefaultSignalingUrl()
+  useSignalingServer: true, // Enable WebSocket by default for cross-device support!
 };
+

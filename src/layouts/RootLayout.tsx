@@ -4,11 +4,10 @@ import { Navbar } from '../components/navigation/Navbar';
 import { MobileNav } from '../components/navigation/MobileNav';
 import { Footer } from '../components/navigation/Footer';
 import { ToastContainer } from '../components/common/Toast';
-import { IncomingTransferModal } from '../features/transfer/IncomingTransferModal';
 import { useWebRTC } from '../hooks/useWebRTC';
 
 export const RootLayout: React.FC = () => {
-  const { pendingProposal, acceptTransfer, rejectTransfer } = useWebRTC();
+  useWebRTC();
 
   return (
     <div className="min-h-screen flex flex-col bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 selection:bg-blue-500/20 selection:text-blue-500 transition-colors duration-200">
@@ -23,13 +22,6 @@ export const RootLayout: React.FC = () => {
 
       {/* Global Toast Container */}
       <ToastContainer />
-
-      {/* Global Incoming Transfer Modal */}
-      <IncomingTransferModal
-        proposal={pendingProposal}
-        onAccept={acceptTransfer}
-        onReject={rejectTransfer}
-      />
     </div>
   );
 };

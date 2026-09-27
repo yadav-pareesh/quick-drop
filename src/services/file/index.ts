@@ -1,6 +1,5 @@
 import type { FileMetadata } from '../../types';
 import { sanitizeFilename } from '../../utils/validators';
-import { calculateSHA256 } from '../crypto';
 
 export type FileCategory = 
   | 'image' 
@@ -63,12 +62,11 @@ export async function processFileForTransfer(file: File): Promise<FileMetadata> 
   const id = `file_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`;
   
   let previewUrl: string | undefined;
-  if (file.type.startsWith('image/') && file.size < 20 * 1024 * 1024) {
-    previewUrl = URL.createObjectURL(file);
+  if (file.type.startsWith('image/') && file.size < 5 * 1024 * 1024) {
+    try {
+      previewUrl = URL.createObjectURL(file);
+    } catch {}
   }
-
-  // Pre-calculate hash
-  const sha256 = await calculateSHA256(file);
 
   return {
     id,
@@ -76,7 +74,6 @@ export async function processFileForTransfer(file: File): Promise<FileMetadata> 
     size: file.size,
     type: file.type || 'application/octet-stream',
     lastModified: file.lastModified,
-    sha256,
     previewUrl,
   };
 }

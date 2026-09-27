@@ -25,15 +25,19 @@ export type ConnectionState =
   | 'disconnected'
   | 'failed';
 
-export type TransferStatus = 
+export type TransferDirection = 'outgoing' | 'incoming';
+
+export type TransferItemStatus =
   | 'pending'
-  | 'preparing'
+  | 'awaiting-approval'
+  | 'accepted'
+  | 'rejected'
   | 'transferring'
-  | 'paused'
   | 'completed'
-  | 'failed'
   | 'cancelled'
-  | 'rejected';
+  | 'failed';
+
+export type TransferStatus = TransferItemStatus | 'preparing' | 'paused';
 
 export interface FileMetadata {
   id: string;
@@ -43,6 +47,27 @@ export interface FileMetadata {
   lastModified?: number;
   sha256?: string;
   previewUrl?: string;
+}
+
+export interface TransferSession {
+  id: string;
+  direction: TransferDirection;
+  filename: string;
+  mimeType: string;
+  size: number;
+  status: TransferItemStatus;
+  progress: number; // 0 - 100
+  bytesTransferred: number;
+  speed: number; // Bytes per second
+  createdAt: number;
+  senderPeerId: string;
+  senderDeviceName: string;
+  receiverPeerId: string;
+  receiverDeviceName: string;
+  error?: string;
+  blob?: Blob;
+  downloadUrl?: string;
+  files?: Array<FileMetadata & { status: TransferItemStatus; progress: number; downloadUrl?: string; blob?: Blob }>;
 }
 
 export interface TransferProgressState {
@@ -55,7 +80,7 @@ export interface TransferProgressState {
   currentFileSize: number;
   bytesTransferred: number;
   totalBytes: number;
-  speedBps: number; // Bytes per second
+  speedBps: number;
   etaSeconds: number;
   percentage: number;
   files: Array<FileMetadata & { status: TransferStatus; progress: number; downloadUrl?: string; blob?: Blob }>;
@@ -87,29 +112,35 @@ export interface SignalingMessage {
 export type DataChannelMessageType = 
   | 'HANDSHAKE'
   | 'HANDSHAKE_ACK'
-  | 'TRANSFER_PROPOSAL'
+  | 'FILE_OFFER'
+  | 'FILE_ACCEPT'
+  | 'FILE_REJECT'
+  | 'FILE_PROGRESS'
+  | 'FILE_COMPLETE'
+  | 'FILE_CANCEL'
+  | 'TRANSFER_ERROR'
+  | 'TRANSFER_PROPOSAL' // for backward compatibility
   | 'TRANSFER_ACCEPT'
   | 'TRANSFER_REJECT'
-  | 'TRANSFER_START'
   | 'FILE_HEADER'
-  | 'FILE_CHUNK'
-  | 'FILE_COMPLETE'
-  | 'TRANSFER_CANCEL'
   | 'TEXT_MESSAGE'
   | 'PING'
   | 'PONG';
 
 export interface DataChannelMessage {
   type: DataChannelMessageType;
+  transferId?: string;
   payload?: any;
 }
 
-export interface TransferProposalPayload {
+export interface FileOfferPayload {
   transferId: string;
   senderDevice: DeviceInfo;
   files: FileMetadata[];
   totalBytes: number;
 }
+
+export interface TransferProposalPayload extends FileOfferPayload {}
 
 export interface FileHeaderPayload {
   transferId: string;

@@ -1,5 +1,6 @@
 import type { DeviceInfo, SignalingMessage } from '../../types';
 import type { ISignalingAdapter, SignalingMessageHandler } from './types';
+import { getDefaultSignalingUrl } from '../../constants';
 
 export class WebSocketAdapter implements ISignalingAdapter {
   public name = 'WebSocket Server';
@@ -13,6 +14,13 @@ export class WebSocketAdapter implements ISignalingAdapter {
 
   constructor(serverUrl: string) {
     this.serverUrl = serverUrl;
+  }
+
+  private resolveUrl(): string {
+    if (!this.serverUrl || this.serverUrl === 'ws://localhost:4000') {
+      return getDefaultSignalingUrl();
+    }
+    return this.serverUrl;
   }
 
   setServerUrl(url: string): void {
@@ -35,19 +43,14 @@ export class WebSocketAdapter implements ISignalingAdapter {
       return;
     }
 
+    const targetUrl = this.resolveUrl();
+
     return new Promise((resolve) => {
       try {
-        this.socket = new WebSocket(this.serverUrl);
+        this.socket = new WebSocket(targetUrl);
+
 
         this.socket.onopen = () => {
-          if (this.currentRoomId && this.localDevice) {
-            this.send({
-              type: 'ROOM_JOINED',
-              roomId: this.currentRoomId,
-              senderId: this.localDevice.id,
-              senderDevice: this.localDevice,
-            });
-          }
           resolve();
         };
 
@@ -81,11 +84,19 @@ export class WebSocketAdapter implements ISignalingAdapter {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = window.setTimeout(() => {
+    this.reconnectTimer = window.setTimeout(async () => {
       if (!this.isExplicitlyClosed) {
-        this.connect().catch(() => {});
+        await this.connect().catch(() => {});
+        if (this.currentRoomId && this.localDevice && this.isConnected()) {
+          this.send({
+            type: 'ROOM_JOINED',
+            roomId: this.currentRoomId,
+            senderId: this.localDevice.id,
+            senderDevice: this.localDevice,
+          });
+        }
       }
-    }, 3000);
+    }, 1500);
   }
 
   private send(msg: SignalingMessage): void {

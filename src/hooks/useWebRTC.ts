@@ -7,11 +7,11 @@ import { useToastStore } from '../stores/toastStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { webrtcService } from '../services/webrtc';
 import { useSound } from './useSound';
-import type { TransferProposalPayload } from '../types';
+import type { FileMetadata, TransferSession } from '../types';
 
 export function useWebRTC() {
   const { setConnectionState, setPeerLatency, localDevice, remoteDevice } = useConnectionStore();
-  const { setActiveTransfer, setPendingProposal, activeTransfer, pendingProposal } = useTransferStore();
+  const { transfers, addTransfer, updateTransfer } = useTransferStore();
   const { addItem: addHistoryItem } = useHistoryStore();
   const { showToast } = useToastStore();
   const { settings } = useSettingsStore();
@@ -47,67 +47,79 @@ export function useWebRTC() {
         }
       },
 
-      onIncomingProposal: (proposal: TransferProposalPayload) => {
-        playNotify();
-        if (settings.autoAcceptFromKnown) {
-          webrtcService.acceptIncomingTransfer(proposal);
-          showToast({
-            type: 'info',
-            title: 'Auto-Accepting Transfer',
-            message: `Receiving ${proposal.files.length} file(s) from ${proposal.senderDevice.name}`,
-          });
-        } else {
-          setPendingProposal(proposal);
+      onTransferCreated: (session: TransferSession) => {
+        addTransfer(session);
+
+        if (session.direction === 'incoming') {
+          playNotify();
+          if (settings.autoAcceptFromKnown) {
+            webrtcService.acceptIncomingTransfer(session.id);
+            showToast({
+              type: 'info',
+              title: 'Auto-Accepting File',
+              message: `Receiving ${session.filename} from ${session.senderDeviceName}`,
+            });
+          } else {
+            showToast({
+              type: 'info',
+              title: 'Incoming File Transfer',
+              message: `${session.senderDeviceName} wants to send ${session.filename}`,
+            });
+          }
         }
       },
 
-      onTransferProgress: (progress) => {
-        setActiveTransfer(progress);
+      onTransferProgress: (session: TransferSession) => {
+        updateTransfer(session.id, session);
       },
 
-      onTransferComplete: (transferId, receivedFiles) => {
-        playTransferComplete();
-        confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-          colors: ['#3b82f6', '#10b981', '#6366f1', '#06b6d4'],
-        });
+      onTransferComplete: (session: TransferSession) => {
+        updateTransfer(session.id, session);
 
-        const active = useTransferStore.getState().activeTransfer;
+        if (session.direction === 'incoming') {
+          playTransferComplete();
+          confetti({
+            particleCount: 80,
+            spread: 70,
+            origin: { y: 0.6 },
+            colors: ['#3b82f6', '#10b981', '#6366f1', '#06b6d4'],
+          });
+        }
+
         const currentRemote = useConnectionStore.getState().remoteDevice;
 
-        if (active) {
-          addHistoryItem({
-            id: transferId,
-            timestamp: Date.now(),
-            peerDeviceName: currentRemote?.name || 'Remote Device',
-            peerDeviceType: currentRemote?.type || 'desktop',
-            direction: active.direction,
-            fileCount: active.files.length,
-            totalBytes: active.totalBytes,
-            status: 'completed',
-            files: active.files.map((f) => ({
-              name: f.name,
-              size: f.size,
-              type: f.type,
-            })),
-          });
-        }
+        addHistoryItem({
+          id: session.id,
+          timestamp: Date.now(),
+          peerDeviceName: currentRemote?.name || (session.direction === 'incoming' ? session.senderDeviceName : session.receiverDeviceName),
+          peerDeviceType: currentRemote?.type || 'desktop',
+          direction: session.direction === 'outgoing' ? 'send' : 'receive',
+          fileCount: 1,
+          totalBytes: session.size,
+          status: 'completed',
+          files: [
+            {
+              name: session.filename,
+              size: session.size,
+              type: session.mimeType,
+            },
+          ],
+        });
 
         showToast({
           type: 'success',
           title: 'Transfer Complete',
-          message: active?.direction === 'send' 
-            ? 'All files delivered successfully!' 
-            : `${receivedFiles.length} file(s) ready to download.`,
+          message: session.direction === 'outgoing' 
+            ? `Successfully sent ${session.filename}` 
+            : `${session.filename} received and ready to save!`,
         });
       },
 
-      onTransferError: (error) => {
+      onTransferError: (transferId, error) => {
+        updateTransfer(transferId, { status: 'failed', error });
         showToast({
           type: 'error',
-          title: 'Transfer Stopped',
+          title: 'Transfer Alert',
           message: error,
         });
       },
@@ -126,48 +138,51 @@ export function useWebRTC() {
         setPeerLatency(latency);
       },
     });
+  }, [localDevice, setConnectionState, setPeerLatency, showToast, playConnected, playTransferComplete, playNotify, settings.autoAcceptFromKnown, addTransfer, updateTransfer, addHistoryItem]);
 
-    return () => {
-      // Keep connection intact across component mount/unmount unless explicitly disconnected
-    };
-  }, [localDevice, setConnectionState, setPeerLatency, showToast, playConnected, playTransferComplete, playNotify, settings.autoAcceptFromKnown, setPendingProposal, setActiveTransfer, addHistoryItem]);
+  const startTransfer = useCallback((files: File[], metadata: FileMetadata[]) => {
+    return webrtcService.startTransfer(files, metadata);
+  }, []);
 
-  const acceptTransfer = useCallback((proposal: TransferProposalPayload) => {
-    setPendingProposal(null);
-    webrtcService.acceptIncomingTransfer(proposal);
-  }, [setPendingProposal]);
+  const acceptTransfer = useCallback((transferId: string) => {
+    webrtcService.acceptIncomingTransfer(transferId);
+  }, []);
 
-  const rejectTransfer = useCallback((proposal: TransferProposalPayload) => {
-    setPendingProposal(null);
-    webrtcService.rejectIncomingTransfer(proposal);
+  const rejectTransfer = useCallback((transferId: string) => {
+    webrtcService.rejectIncomingTransfer(transferId);
     showToast({
       type: 'info',
       title: 'Transfer Declined',
       message: 'You rejected the incoming file transfer.',
     });
-  }, [setPendingProposal, showToast]);
+  }, [showToast]);
 
-  const cancelTransfer = useCallback(() => {
-    webrtcService.cancelTransfer();
+  const cancelTransfer = useCallback((transferId: string) => {
+    webrtcService.cancelTransfer(transferId);
     showToast({
       type: 'warning',
       title: 'Transfer Cancelled',
-      message: 'You cancelled the file transfer.',
+      message: 'Transfer was cancelled.',
     });
   }, [showToast]);
 
+  const sendTextMessage = useCallback((text: string) => {
+    return webrtcService.sendTextMessage(text);
+  }, []);
+
   const disconnect = useCallback(() => {
     webrtcService.disconnect();
-    useTransferStore.getState().resetTransfer();
+    useTransferStore.getState().resetAllTransfers();
   }, []);
 
   return {
+    transfers,
+    startTransfer,
     acceptTransfer,
     rejectTransfer,
     cancelTransfer,
+    sendTextMessage,
     disconnect,
-    activeTransfer,
-    pendingProposal,
     remoteDevice,
   };
 }

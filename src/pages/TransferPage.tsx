@@ -15,7 +15,7 @@ import { ConnectionVisualizer } from '../features/device/ConnectionVisualizer';
 import { ConnectionStatus } from '../features/device/ConnectionStatus';
 import { FileDropzone } from '../features/transfer/FileDropzone';
 import { FileList } from '../features/transfer/FileList';
-import { TransferProgress } from '../features/transfer/TransferProgress';
+import { TransferCenter } from '../features/transfer/TransferCenter';
 import { TextTransferModal } from '../features/transfer/TextTransferModal';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { Button } from '../components/common/Button';
@@ -37,42 +37,53 @@ export const TransferPage: React.FC = () => {
   const { connectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
   const { currentRoomId, setRoom, clearRoom } = useRoomStore();
   const { 
+    transfers,
     selectedFiles, 
     selectedFileMetadata, 
-    activeTransfer, 
     appendSelectedFiles, 
     removeSelectedFile, 
     clearSelectedFiles,
-    setActiveTransfer,
-    resetTransfer 
+    clearCompletedTransfers,
+    resetAllTransfers
   } = useTransferStore();
   const { showToast } = useToastStore();
 
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(
-    actionParam === 'join' || roomParam ? 'join' : 'create'
+    actionParam === 'join' || (roomParam && actionParam !== 'create') ? 'join' : 'create'
   );
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isTextModalOpen, setIsTextModalOpen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [joinErrorMessage, setJoinErrorMessage] = useState<string | null>(null);
 
-  // Auto-join if room query parameter present
+  const handleJoinRoom = React.useCallback(async (code: string) => {
+    setJoinErrorMessage(null);
+    setRoom(code, false);
+    setSearchParams({ room: code, action: 'join' });
+    try {
+      await webrtcService.joinRoom(code, localDevice);
+    } catch {
+      setJoinErrorMessage('Failed to connect to room. Check code and try again.');
+    }
+  }, [setRoom, setSearchParams, localDevice]);
+
+  // Auto-join if room query parameter present and user is joiner
   useEffect(() => {
-    if (roomParam && connectionState === 'idle') {
+    if (roomParam && actionParam !== 'create' && connectionState === 'idle') {
       const code = normalizeRoomCode(roomParam);
       if (isValidRoomCode(code)) {
         handleJoinRoom(code);
       }
     }
-  }, [roomParam]);
+  }, [roomParam, actionParam, connectionState, handleJoinRoom]);
 
   const handleCreateRoom = async () => {
     const code = generateRoomCode();
     setRoom(code, true);
-    setSearchParams({ room: code });
+    setSearchParams({ room: code, action: 'create' });
     try {
       await webrtcService.createRoom(code, localDevice);
-    } catch (err) {
+    } catch {
       showToast({
         type: 'error',
         title: 'Room Creation Failed',
@@ -81,23 +92,14 @@ export const TransferPage: React.FC = () => {
     }
   };
 
-  const handleJoinRoom = async (code: string) => {
-    setJoinErrorMessage(null);
-    setRoom(code, false);
-    setSearchParams({ room: code });
-    try {
-      await webrtcService.joinRoom(code, localDevice);
-    } catch (err) {
-      setJoinErrorMessage('Failed to connect to room. Check code and try again.');
-    }
-  };
+
 
   const handleFilesSelected = async (newFiles: File[]) => {
     setIsProcessingFiles(true);
     try {
       const metadataList = await Promise.all(newFiles.map(processFileForTransfer));
       appendSelectedFiles(newFiles, metadataList);
-    } catch (err) {
+    } catch {
       showToast({
         type: 'error',
         title: 'File Selection Error',
@@ -111,8 +113,13 @@ export const TransferPage: React.FC = () => {
   const handleSendFiles = async () => {
     if (selectedFiles.length === 0 || !remoteDevice) return;
     try {
-      await webrtcService.proposeTransfer(selectedFiles, selectedFileMetadata);
+      webrtcService.startTransfer(selectedFiles, selectedFileMetadata);
       clearSelectedFiles();
+      showToast({
+        type: 'info',
+        title: 'Transfer Started',
+        message: `Offered ${selectedFiles.length} file(s) to ${remoteDevice.name}`,
+      });
     } catch (err: any) {
       showToast({
         type: 'error',
@@ -126,7 +133,7 @@ export const TransferPage: React.FC = () => {
     webrtcService.disconnect();
     clearRoom();
     resetConnection();
-    resetTransfer();
+    resetAllTransfers();
     setSearchParams({});
     showToast({
       type: 'info',
@@ -138,6 +145,10 @@ export const TransferPage: React.FC = () => {
   const isConnected = connectionState === 'connected' && remoteDevice !== null;
   const isWaiting = connectionState === 'waiting_for_peer' || connectionState === 'creating_room';
   const isConnecting = connectionState === 'connecting' || connectionState === 'joining_room';
+
+  const hasActiveTransfer = Object.values(transfers).some(
+    (t) => t.status === 'transferring'
+  );
 
   return (
     <div className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-10">
@@ -174,25 +185,28 @@ export const TransferPage: React.FC = () => {
           <ConnectionVisualizer
             localDevice={localDevice}
             remoteDevice={remoteDevice}
-            isTransferring={activeTransfer?.status === 'transferring'}
+            isTransferring={hasActiveTransfer}
           />
 
-          {/* Transfer In Progress View OR File Selection Dropzone */}
-          {activeTransfer ? (
-            <TransferProgress
-              progress={activeTransfer}
-              onCancel={() => webrtcService.cancelTransfer()}
-              onDismiss={() => setActiveTransfer(null)}
-            />
-          ) : (
-            <div className="flex flex-col gap-6">
-              <FileDropzone
-                onFilesSelected={handleFilesSelected}
-                onOpenSendText={() => setIsTextModalOpen(true)}
-                disabled={isProcessingFiles}
-              />
+          {/* Unified Transfer Center (Independent Sessions, Direction Badges, Multi-File) */}
+          <TransferCenter
+            transfers={transfers}
+            onAccept={(id) => webrtcService.acceptIncomingTransfer(id)}
+            onReject={(id) => webrtcService.rejectIncomingTransfer(id)}
+            onCancel={(id) => webrtcService.cancelTransfer(id)}
+            onClearCompleted={clearCompletedTransfers}
+          />
 
-              {/* Selected Files Preview List */}
+          {/* File Selection Dropzone & Staging (Always Available While Connected) */}
+          <div className="flex flex-col gap-6">
+            <FileDropzone
+              onFilesSelected={handleFilesSelected}
+              onOpenSendText={() => setIsTextModalOpen(true)}
+              disabled={isProcessingFiles}
+            />
+
+            {/* Selected Files Preview List */}
+            {selectedFileMetadata.length > 0 && (
               <FileList
                 files={selectedFileMetadata}
                 onRemoveFile={removeSelectedFile}
@@ -200,8 +214,8 @@ export const TransferPage: React.FC = () => {
                 onSend={handleSendFiles}
                 isSending={isProcessingFiles}
               />
-            </div>
-          )}
+            )}
+          </div>
         </div>
       ) : isWaiting && currentRoomId ? (
         /* Host waiting for device */

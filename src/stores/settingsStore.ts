@@ -13,14 +13,29 @@ const loadStoredSettings = (): AppSettings => {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SETTINGS);
     if (raw) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw);
+      // Migrate legacy settings: ensure cross-device WebSocket signaling is enabled
+      if (parsed.signalingServerUrl === 'ws://localhost:4000') {
+        parsed.signalingServerUrl = '';
+      }
+      if (parsed.useSignalingServer === undefined || parsed.useSignalingServer === false) {
+        parsed.useSignalingServer = true;
+      }
+      return { ...DEFAULT_SETTINGS, ...parsed };
     }
   } catch {}
   return DEFAULT_SETTINGS;
 };
 
+const initialSettings = loadStoredSettings();
+signalingService.setAdapterMode(
+  initialSettings.useSignalingServer,
+  initialSettings.signalingServerUrl || undefined
+);
+
 export const useSettingsStore = create<SettingsStore>((set) => ({
-  settings: loadStoredSettings(),
+  settings: initialSettings,
+
 
   updateSettings: (partial) =>
     set((state) => {
