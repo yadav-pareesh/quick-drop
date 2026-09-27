@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { RoomCode } from './RoomCode';
 import { QRCodeCard } from './QRCodeCard';
-import { ShieldCheck, Sparkles } from 'lucide-react';
+import { ShieldCheck, Sparkles, Wifi } from 'lucide-react';
 import { useConnectionStore } from '../../stores/connectionStore';
 
 interface CreateRoomCardProps {
@@ -15,8 +15,29 @@ export const CreateRoomCard: React.FC<CreateRoomCardProps> = ({
   className = '',
 }) => {
   const { localDevice } = useConnectionStore();
-  const shareUrl = `${window.location.origin}/transfer?room=${roomId}`;
+  const [networkOrigin, setNetworkOrigin] = useState<string>(window.location.origin);
   const isMobile = localDevice.type === 'mobile';
+
+  // Automatically fetch LAN IP from Vite server if running on localhost
+  useEffect(() => {
+    const isLocalhost =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname === '0.0.0.0';
+
+    if (isLocalhost) {
+      fetch('/api/network-ip')
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.url && data.ip !== 'localhost') {
+            setNetworkOrigin(data.url);
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  const shareUrl = `${networkOrigin}/transfer?room=${roomId}&action=join`;
 
   return (
     <div
@@ -35,6 +56,14 @@ export const CreateRoomCard: React.FC<CreateRoomCardProps> = ({
             ? 'Open QuickDrop on your computer or tablet to transfer directly.'
             : 'Scan the QR code with your mobile camera or enter the transfer code.'}
         </p>
+
+        {/* Network indicator badge */}
+        {networkOrigin !== window.location.origin && (
+          <div className="inline-flex items-center gap-1.5 mt-2 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium">
+            <Wifi className="w-3 h-3 text-emerald-500" />
+            <span>LAN Network URL generated for mobile device</span>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col md:flex-row items-center justify-center gap-6 max-w-xl mx-auto">

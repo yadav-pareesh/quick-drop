@@ -21,6 +21,8 @@ export function formatDuration(seconds: number): string {
   return `${mins}m ${secs}s`;
 }
 
+export const formatEta = formatDuration;
+
 export function formatDate(timestamp: number): string {
   const date = new Date(timestamp);
   const now = new Date();

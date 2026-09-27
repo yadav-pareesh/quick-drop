@@ -2,19 +2,20 @@ import type { DeviceInfo } from '../../types';
 import { BroadcastChannelAdapter } from './BroadcastChannelAdapter';
 import { WebSocketAdapter } from './WebSocketAdapter';
 import type { ISignalingAdapter, SignalingMessageHandler } from './types';
-import { DEFAULT_SETTINGS } from '../../constants';
+import { DEFAULT_SETTINGS, getDefaultSignalingUrl } from '../../constants';
 
 export class SignalingService {
   private activeAdapter: ISignalingAdapter;
   private broadcastAdapter: BroadcastChannelAdapter;
   private wsAdapter: WebSocketAdapter;
-  private currentMode: 'broadcast' | 'websocket' = 'broadcast';
+  private currentMode: 'broadcast' | 'websocket' = 'websocket';
 
   constructor() {
     this.broadcastAdapter = new BroadcastChannelAdapter();
-    this.wsAdapter = new WebSocketAdapter(DEFAULT_SETTINGS.signalingServerUrl);
-    this.activeAdapter = this.broadcastAdapter;
+    this.wsAdapter = new WebSocketAdapter(DEFAULT_SETTINGS.signalingServerUrl || getDefaultSignalingUrl());
+    this.activeAdapter = this.wsAdapter;
   }
+
 
   setAdapterMode(useWebSocket: boolean, serverUrl?: string): void {
     if (serverUrl) {

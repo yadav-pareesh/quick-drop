@@ -1,26 +1,99 @@
 import { create } from 'zustand';
-import type { FileMetadata, TransferProgressState, TransferProposalPayload } from '../types';
+import type { FileMetadata, TransferSession, TransferProgressState } from '../types';
 
 interface TransferStore {
+  transfers: Record<string, TransferSession>;
   selectedFiles: File[];
   selectedFileMetadata: FileMetadata[];
-  activeTransfer: TransferProgressState | null;
-  pendingProposal: TransferProposalPayload | null;
 
+  // Multi-transfer actions
+  addTransfer: (session: TransferSession) => void;
+  updateTransfer: (id: string, partial: Partial<TransferSession>) => void;
+  removeTransfer: (id: string) => void;
+  clearCompletedTransfers: () => void;
+  resetAllTransfers: () => void;
+
+  // File staging actions
   setSelectedFiles: (files: File[], metadata: FileMetadata[]) => void;
   appendSelectedFiles: (files: File[], metadata: FileMetadata[]) => void;
   removeSelectedFile: (fileId: string) => void;
   clearSelectedFiles: () => void;
+
+  // Legacy compat getters/setters
+  activeTransfer: TransferProgressState | null;
   setActiveTransfer: (transfer: TransferProgressState | null) => void;
-  setPendingProposal: (proposal: TransferProposalPayload | null) => void;
   resetTransfer: () => void;
 }
 
 export const useTransferStore = create<TransferStore>((set) => ({
+  transfers: {},
   selectedFiles: [],
   selectedFileMetadata: [],
   activeTransfer: null,
-  pendingProposal: null,
+
+  addTransfer: (session) =>
+    set((state) => ({
+      transfers: {
+        ...state.transfers,
+        [session.id]: session,
+      },
+    })),
+
+  updateTransfer: (id, partial) =>
+    set((state) => {
+      const existing = state.transfers[id];
+      if (!existing) return state;
+
+      return {
+        transfers: {
+          ...state.transfers,
+          [id]: {
+            ...existing,
+            ...partial,
+          },
+        },
+      };
+    }),
+
+  removeTransfer: (id) =>
+    set((state) => {
+      const existing = state.transfers[id];
+      if (existing?.downloadUrl) {
+        URL.revokeObjectURL(existing.downloadUrl);
+      }
+      const updated = { ...state.transfers };
+      delete updated[id];
+      return { transfers: updated };
+    }),
+
+  clearCompletedTransfers: () =>
+    set((state) => {
+      const updated: Record<string, TransferSession> = {};
+      Object.entries(state.transfers).forEach(([id, t]) => {
+        if (t.status === 'transferring' || t.status === 'pending' || t.status === 'awaiting-approval') {
+          updated[id] = t;
+        } else if (t.downloadUrl) {
+          URL.revokeObjectURL(t.downloadUrl);
+        }
+      });
+      return { transfers: updated };
+    }),
+
+  resetAllTransfers: () =>
+    set((state) => {
+      Object.values(state.transfers).forEach((t) => {
+        if (t.downloadUrl) URL.revokeObjectURL(t.downloadUrl);
+      });
+      state.selectedFileMetadata.forEach((m) => {
+        if (m.previewUrl) URL.revokeObjectURL(m.previewUrl);
+      });
+      return {
+        transfers: {},
+        selectedFiles: [],
+        selectedFileMetadata: [],
+        activeTransfer: null,
+      };
+    }),
 
   setSelectedFiles: (files, metadata) =>
     set({
@@ -65,7 +138,6 @@ export const useTransferStore = create<TransferStore>((set) => ({
     }),
 
   setActiveTransfer: (transfer) => set({ activeTransfer: transfer }),
-  setPendingProposal: (proposal) => set({ pendingProposal: proposal }),
 
   resetTransfer: () =>
     set((state) => {
@@ -76,7 +148,6 @@ export const useTransferStore = create<TransferStore>((set) => ({
         selectedFiles: [],
         selectedFileMetadata: [],
         activeTransfer: null,
-        pendingProposal: null,
       };
     }),
 }));

@@ -2,13 +2,13 @@ import type {
   ConnectionState, 
   DataChannelMessage, 
   DeviceInfo, 
-  FileHeaderPayload, 
   FileMetadata, 
+  FileOfferPayload,
   SignalingMessage, 
   TextMessagePayload, 
-  TransferProgressState, 
+  TransferItemStatus, 
   TransferProposalPayload,
-  TransferStatus 
+  TransferSession
 } from '../../types';
 import { 
   DEFAULT_CHUNK_SIZE, 
@@ -17,25 +17,55 @@ import {
   LOW_WATER_MARK 
 } from '../../constants';
 import { signalingService } from '../signaling';
+import { encodeChunkPacket, decodeChunkPacket } from '../../utils/packet';
 
 export type WebRTCEventCallback = {
   onConnectionStateChange: (state: ConnectionState, peerDevice?: DeviceInfo) => void;
-  onIncomingProposal: (proposal: TransferProposalPayload) => void;
-  onTransferProgress: (progress: TransferProgressState) => void;
-  onTransferComplete: (transferId: string, receivedFiles: Array<{ metadata: FileMetadata; blob: Blob }>) => void;
-  onTransferError: (error: string) => void;
+  onTransferCreated: (session: TransferSession) => void;
+  onTransferProgress: (session: TransferSession) => void;
+  onTransferComplete: (session: TransferSession) => void;
+  onTransferError: (transferId: string, error: string) => void;
   onTextMessage: (message: TextMessagePayload) => void;
   onPeerLatency: (latencyMs: number) => void;
+  onIncomingProposal?: (proposal: TransferProposalPayload) => void; // Legacy compatibility
 };
 
-interface ActiveTransferFile extends FileMetadata {
-  fileObj?: File;
+interface OutgoingFileState {
+  id: string;
+  file: File;
+  metadata: FileMetadata;
+  chunkSize: number;
+  totalChunks: number;
+  currentChunkIndex: number;
+  offset: number;
+  status: TransferItemStatus;
+  bytesTransferred: number;
+  cancelled: boolean;
+  paused: boolean;
+  startTime: number;
+  lastCalcTime: number;
+  lastCalcBytes: number;
+  currentSpeedBps: number;
+  error?: string;
+}
+
+interface IncomingFileState {
+  id: string;
+  metadata: FileMetadata;
+  senderDevice: DeviceInfo;
+  status: TransferItemStatus;
+  receivedBytes: number;
+  chunks: Uint8Array[];
+  totalChunks: number;
+  chunkSize: number;
+  startTime: number;
+  lastCalcTime: number;
+  lastCalcBytes: number;
+  currentSpeedBps: number;
+  cancelled: boolean;
   blob?: Blob;
-  receivedBytes?: number;
-  chunks?: Uint8Array[];
-  status: TransferStatus;
-  progress: number;
   downloadUrl?: string;
+  error?: string;
 }
 
 export class WebRTCService {
@@ -48,23 +78,13 @@ export class WebRTCService {
   private unsubscribeSignaling: (() => void) | null = null;
   private callbacks: Partial<WebRTCEventCallback> = {};
 
-  // ICE candidates queue while remoteDescription is null
+  // ICE candidate queue while remoteDescription is null
   private iceCandidateQueue: RTCIceCandidateInit[] = [];
 
-  // Transfer state
-  private activeTransfer: {
-    id: string;
-    direction: 'send' | 'receive';
-    files: ActiveTransferFile[];
-    currentFileIndex: number;
-    totalBytes: number;
-    bytesTransferred: number;
-    startTime: number;
-    lastCalcTime: number;
-    lastCalcBytes: number;
-    currentSpeedBps: number;
-    cancelled: boolean;
-  } | null = null;
+  // Multi-transfer state maps
+  private outgoingTransfers = new Map<string, OutgoingFileState>();
+  private incomingTransfers = new Map<string, IncomingFileState>();
+  private isSendLoopRunning = false;
 
   // Ping interval
   private pingInterval: number | null = null;
@@ -112,6 +132,9 @@ export class WebRTCService {
 
   private setupPeerConnection(): RTCPeerConnection {
     if (this.peerConnection) {
+      this.peerConnection.onconnectionstatechange = null;
+      this.peerConnection.oniceconnectionstatechange = null;
+      this.peerConnection.onicecandidate = null;
       this.cleanupPeerConnection();
     }
 
@@ -121,7 +144,10 @@ export class WebRTCService {
 
     pc.onicecandidate = (event) => {
       if (event.candidate && this.currentRoomId) {
-        signalingService.sendIceCandidate(this.currentRoomId, event.candidate.toJSON(), this.remoteDevice?.id);
+        const candidateJson = event.candidate.toJSON();
+        if (candidateJson.candidate) {
+          signalingService.sendIceCandidate(this.currentRoomId, candidateJson, this.remoteDevice?.id);
+        }
       }
     };
 
@@ -129,9 +155,10 @@ export class WebRTCService {
       switch (pc.connectionState) {
         case 'connected':
           break;
-        case 'disconnected':
         case 'failed':
-          this.callbacks.onConnectionStateChange?.('disconnected', this.remoteDevice || undefined);
+          if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+            this.callbacks.onConnectionStateChange?.('disconnected', this.remoteDevice || undefined);
+          }
           break;
         case 'closed':
           this.callbacks.onConnectionStateChange?.('idle');
@@ -140,7 +167,10 @@ export class WebRTCService {
     };
 
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+      if (
+        pc.iceConnectionState === 'failed' &&
+        this.dataChannel?.readyState === 'open'
+      ) {
         this.callbacks.onConnectionStateChange?.('reconnecting', this.remoteDevice || undefined);
       }
     };
@@ -165,6 +195,9 @@ export class WebRTCService {
           payload: { device: this.localDevice },
         });
       }
+
+      // Resume any queued outgoing transfers
+      this.ensureSendLoop();
     };
 
     channel.onclose = () => {
@@ -201,6 +234,13 @@ export class WebRTCService {
         }
 
         if (this.isInitiator && msg.type === 'ROOM_JOINED') {
+          if (
+            this.peerConnection &&
+            (this.peerConnection.connectionState === 'connected' ||
+              this.peerConnection.signalingState === 'have-local-offer')
+          ) {
+            return;
+          }
           this.callbacks.onConnectionStateChange?.('connecting', this.remoteDevice || undefined);
           await this.startOfferFlow();
         }
@@ -211,6 +251,12 @@ export class WebRTCService {
           this.remoteDevice = msg.senderDevice;
         }
         if (!this.isInitiator && msg.payload?.offer) {
+          if (
+            this.peerConnection &&
+            this.peerConnection.connectionState === 'connected'
+          ) {
+            return;
+          }
           this.callbacks.onConnectionStateChange?.('connecting', this.remoteDevice || undefined);
           await this.handleOffer(msg.payload.offer);
         }
@@ -218,25 +264,33 @@ export class WebRTCService {
 
       case 'ANSWER':
         if (msg.payload?.answer && this.peerConnection) {
-          await this.peerConnection.setRemoteDescription(new RTCSessionDescription(msg.payload.answer));
-          this.flushIceCandidateQueue();
+          if (this.peerConnection.signalingState === 'have-local-offer') {
+            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(msg.payload.answer));
+            await this.flushIceCandidateQueue();
+          }
         }
         break;
 
       case 'ICE_CANDIDATE':
         if (msg.payload?.candidate) {
-          const candidate = new RTCIceCandidate(msg.payload.candidate);
+          const candInit = msg.payload.candidate;
+          if (!candInit.candidate) break;
           if (this.peerConnection && this.peerConnection.remoteDescription) {
-            await this.peerConnection.addIceCandidate(candidate).catch(console.warn);
+            this.peerConnection.addIceCandidate(new RTCIceCandidate(candInit)).catch((err) => {
+              console.warn('Could not add ICE candidate:', err);
+            });
           } else {
-            this.iceCandidateQueue.push(msg.payload.candidate);
+            this.iceCandidateQueue.push(candInit);
           }
         }
         break;
 
       case 'PEER_LEFT':
-        this.callbacks.onConnectionStateChange?.('disconnected', this.remoteDevice || undefined);
-        this.remoteDevice = null;
+        // Only mark disconnected if DataChannel is NOT established
+        if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+          this.callbacks.onConnectionStateChange?.('disconnected', this.remoteDevice || undefined);
+          this.remoteDevice = null;
+        }
         break;
     }
   }
@@ -264,7 +318,7 @@ export class WebRTCService {
     };
 
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    this.flushIceCandidateQueue();
+    await this.flushIceCandidateQueue();
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -274,12 +328,17 @@ export class WebRTCService {
     }
   }
 
-  private flushIceCandidateQueue(): void {
+  private async flushIceCandidateQueue(): Promise<void> {
     if (!this.peerConnection || !this.peerConnection.remoteDescription) return;
-    while (this.iceCandidateQueue.length > 0) {
-      const candidateInit = this.iceCandidateQueue.shift();
-      if (candidateInit) {
-        this.peerConnection.addIceCandidate(new RTCIceCandidate(candidateInit)).catch(console.warn);
+    const candidates = [...this.iceCandidateQueue];
+    this.iceCandidateQueue = [];
+    for (const cand of candidates) {
+      if (cand && cand.candidate) {
+        try {
+          await this.peerConnection.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) {
+          console.warn('flushIceCandidateQueue error:', e);
+        }
       }
     }
   }
@@ -290,8 +349,13 @@ export class WebRTCService {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
       return false;
     }
-    this.dataChannel.send(JSON.stringify(message));
-    return true;
+    try {
+      this.dataChannel.send(JSON.stringify(message));
+      return true;
+    } catch (e) {
+      console.warn('Failed to send control message:', e);
+      return false;
+    }
   }
 
   private handleControlMessage(msg: DataChannelMessage): void {
@@ -314,39 +378,44 @@ export class WebRTCService {
         }
         break;
 
+      case 'FILE_OFFER':
       case 'TRANSFER_PROPOSAL':
-        if (msg.payload) {
-          const proposal = msg.payload as TransferProposalPayload;
-          this.callbacks.onIncomingProposal?.(proposal);
-        }
+        this.handleIncomingFileOffer(msg.payload as FileOfferPayload);
         break;
 
+      case 'FILE_ACCEPT':
       case 'TRANSFER_ACCEPT':
-        if (this.activeTransfer && this.activeTransfer.direction === 'send') {
-          this.beginSendingFiles();
+        if (msg.transferId || msg.payload?.transferId) {
+          const tId = msg.transferId || msg.payload?.transferId;
+          this.handleFileAccepted(tId);
         }
         break;
 
+      case 'FILE_REJECT':
       case 'TRANSFER_REJECT':
-        if (this.activeTransfer) {
-          this.activeTransfer = null;
-          this.callbacks.onTransferError?.('Transfer was rejected by the receiver.');
+        if (msg.transferId || msg.payload?.transferId) {
+          const tId = msg.transferId || msg.payload?.transferId;
+          this.handleFileRejected(tId);
         }
-        break;
-
-      case 'FILE_HEADER':
-        this.prepareToReceiveFile(msg.payload as FileHeaderPayload);
         break;
 
       case 'FILE_COMPLETE':
-        this.finalizeReceivedFile(msg.payload?.fileId);
+        if (msg.transferId || msg.payload?.transferId) {
+          const tId = msg.transferId || msg.payload?.transferId;
+          this.handleFileCompletedBySender(tId);
+        }
         break;
 
-      case 'TRANSFER_CANCEL':
-        if (this.activeTransfer) {
-          this.activeTransfer.cancelled = true;
-          this.activeTransfer = null;
-          this.callbacks.onTransferError?.('Transfer was cancelled by peer.');
+      case 'FILE_CANCEL':
+        if (msg.transferId || msg.payload?.transferId) {
+          const tId = msg.transferId || msg.payload?.transferId;
+          this.handleFileCancelledByPeer(tId);
+        }
+        break;
+
+      case 'TRANSFER_ERROR':
+        if (msg.transferId && msg.payload?.error) {
+          this.handleTransferError(msg.transferId, msg.payload.error);
         }
         break;
 
@@ -369,7 +438,8 @@ export class WebRTCService {
     }
   }
 
-  // --- Ping / Keepalive ---
+  // --- Keepalive Ping/Pong ---
+
   private startPingPong(): void {
     this.stopPingPong();
     this.pingInterval = window.setInterval(() => {
@@ -387,7 +457,8 @@ export class WebRTCService {
     }
   }
 
-  // --- Text Message ---
+  // --- Text Messaging ---
+
   sendTextMessage(text: string): boolean {
     if (!this.isConnected() || !this.localDevice) return false;
     const payload: TextMessagePayload = {
@@ -402,30 +473,106 @@ export class WebRTCService {
     });
   }
 
-  // --- File Sending Flow ---
+  // --- Outgoing File Transfer Initiation ---
 
-  async proposeTransfer(files: File[], metadataList: FileMetadata[]): Promise<string> {
+  proposeTransfer(files: File[], metadataList: FileMetadata[]): string[] {
+    return this.startTransfer(files, metadataList);
+  }
+
+  startTransfer(files: File[], metadataList: FileMetadata[]): string[] {
     if (!this.isConnected() || !this.localDevice) {
       throw new Error('Not connected to a peer');
     }
 
-    const transferId = `tr_${Date.now()}`;
-    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+    const createdIds: string[] = [];
 
-    const transferFiles: ActiveTransferFile[] = metadataList.map((meta, i) => ({
-      ...meta,
-      fileObj: files[i],
-      status: 'pending' as const,
-      progress: 0,
-    }));
+    files.forEach((file, index) => {
+      const meta = metadataList[index] || {
+        id: `f_${Date.now()}_${index}`,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      };
 
-    this.activeTransfer = {
+      const transferId = `tr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const chunkSize = DEFAULT_CHUNK_SIZE;
+      const totalChunks = Math.ceil(file.size / chunkSize);
+
+      const outgoing: OutgoingFileState = {
+        id: transferId,
+        file,
+        metadata: meta,
+        chunkSize,
+        totalChunks,
+        currentChunkIndex: 0,
+        offset: 0,
+        status: 'awaiting-approval',
+        bytesTransferred: 0,
+        cancelled: false,
+        paused: false,
+        startTime: Date.now(),
+        lastCalcTime: Date.now(),
+        lastCalcBytes: 0,
+        currentSpeedBps: 0,
+      };
+
+      this.outgoingTransfers.set(transferId, outgoing);
+      createdIds.push(transferId);
+
+      const session: TransferSession = {
+        id: transferId,
+        direction: 'outgoing',
+        filename: meta.name,
+        mimeType: meta.type,
+        size: meta.size,
+        status: 'awaiting-approval',
+        progress: 0,
+        bytesTransferred: 0,
+        speed: 0,
+        createdAt: Date.now(),
+        senderPeerId: this.localDevice!.id,
+        senderDeviceName: this.localDevice!.name,
+        receiverPeerId: this.remoteDevice?.id || '',
+        receiverDeviceName: this.remoteDevice?.name || 'Peer Device',
+      };
+
+      this.callbacks.onTransferCreated?.(session);
+
+      // Send offer to peer
+      this.sendControlMessage({
+        type: 'FILE_OFFER',
+        transferId,
+        payload: {
+          transferId,
+          senderDevice: this.localDevice,
+          files: [meta],
+          totalBytes: meta.size,
+        } as FileOfferPayload,
+      });
+    });
+
+    return createdIds;
+  }
+
+  // --- Incoming Offer Handling ---
+
+  private handleIncomingFileOffer(offer: FileOfferPayload): void {
+    if (!offer || !offer.transferId || !offer.files || offer.files.length === 0) return;
+
+    const fileMeta = offer.files[0];
+    const transferId = offer.transferId;
+    const chunkSize = DEFAULT_CHUNK_SIZE;
+    const totalChunks = Math.ceil(fileMeta.size / chunkSize);
+
+    const incoming: IncomingFileState = {
       id: transferId,
-      direction: 'send',
-      files: transferFiles,
-      currentFileIndex: 0,
-      totalBytes,
-      bytesTransferred: 0,
+      metadata: fileMeta,
+      senderDevice: offer.senderDevice,
+      status: 'awaiting-approval',
+      receivedBytes: 0,
+      chunks: [],
+      totalChunks,
+      chunkSize,
       startTime: Date.now(),
       lastCalcTime: Date.now(),
       lastCalcBytes: 0,
@@ -433,96 +580,180 @@ export class WebRTCService {
       cancelled: false,
     };
 
-    const proposal: TransferProposalPayload = {
-      transferId,
-      senderDevice: this.localDevice,
-      files: metadataList,
-      totalBytes,
+    this.incomingTransfers.set(transferId, incoming);
+
+    const session: TransferSession = {
+      id: transferId,
+      direction: 'incoming',
+      filename: fileMeta.name,
+      mimeType: fileMeta.type,
+      size: fileMeta.size,
+      status: 'awaiting-approval',
+      progress: 0,
+      bytesTransferred: 0,
+      speed: 0,
+      createdAt: Date.now(),
+      senderPeerId: offer.senderDevice.id,
+      senderDeviceName: offer.senderDevice.name,
+      receiverPeerId: this.localDevice?.id || '',
+      receiverDeviceName: this.localDevice?.name || 'Local Device',
     };
 
-    this.sendControlMessage({
-      type: 'TRANSFER_PROPOSAL',
-      payload: proposal,
-    });
-
-    this.emitProgressUpdate('pending');
-    return transferId;
+    this.callbacks.onTransferCreated?.(session);
+    this.callbacks.onIncomingProposal?.(offer);
   }
 
-  private async beginSendingFiles(): Promise<void> {
-    if (!this.activeTransfer || this.activeTransfer.cancelled) return;
-    this.activeTransfer.startTime = Date.now();
-    this.activeTransfer.lastCalcTime = Date.now();
-    this.emitProgressUpdate('transferring');
+  acceptIncomingTransfer(transferId: string): void {
+    const incoming = this.incomingTransfers.get(transferId);
+    if (!incoming || incoming.status !== 'awaiting-approval') return;
 
-    for (let i = 0; i < this.activeTransfer.files.length; i++) {
-      if (this.activeTransfer.cancelled) break;
-      this.activeTransfer.currentFileIndex = i;
-      const fileEntry = this.activeTransfer.files[i];
-      const file = fileEntry.fileObj;
-      if (!file) continue;
+    incoming.status = 'transferring';
+    incoming.startTime = Date.now();
+    incoming.lastCalcTime = Date.now();
 
-      fileEntry.status = 'transferring';
-      const chunkSize = DEFAULT_CHUNK_SIZE;
-      const totalChunks = Math.ceil(file.size / chunkSize);
+    this.sendControlMessage({
+      type: 'FILE_ACCEPT',
+      transferId,
+    });
 
-      // Send File Header
-      const header: FileHeaderPayload = {
-        transferId: this.activeTransfer.id,
-        fileId: fileEntry.id,
-        name: fileEntry.name,
-        size: file.size,
-        type: file.type,
-        totalChunks,
-        chunkSize,
-        sha256: fileEntry.sha256,
-      };
+    this.emitIncomingProgress(incoming);
+  }
 
-      this.sendControlMessage({
-        type: 'FILE_HEADER',
-        payload: header,
-      });
+  rejectIncomingTransfer(transferId: string): void {
+    const incoming = this.incomingTransfers.get(transferId);
+    if (!incoming) return;
 
-      // Stream file chunks with backpressure
-      let offset = 0;
-      while (offset < file.size && !this.activeTransfer.cancelled) {
+    incoming.status = 'rejected';
+
+    this.sendControlMessage({
+      type: 'FILE_REJECT',
+      transferId,
+    });
+
+    const session = this.buildIncomingSession(incoming);
+    this.callbacks.onTransferProgress?.(session);
+  }
+
+  private handleFileAccepted(transferId: string): void {
+    const outgoing = this.outgoingTransfers.get(transferId);
+    if (!outgoing) return;
+
+    outgoing.status = 'transferring';
+    outgoing.startTime = Date.now();
+    outgoing.lastCalcTime = Date.now();
+
+    this.emitOutgoingProgress(outgoing);
+    this.ensureSendLoop();
+  }
+
+  private handleFileRejected(transferId: string): void {
+    const outgoing = this.outgoingTransfers.get(transferId);
+    if (!outgoing) return;
+
+    outgoing.status = 'rejected';
+    outgoing.error = 'Transfer rejected by receiver';
+
+    const session = this.buildOutgoingSession(outgoing);
+    this.callbacks.onTransferProgress?.(session);
+    this.callbacks.onTransferError?.(transferId, 'Transfer rejected by peer');
+  }
+
+  // --- Chunk Streaming with Backpressure & Fairness ---
+
+  private ensureSendLoop(): void {
+    if (!this.isSendLoopRunning) {
+      this.sendLoop().catch(console.error);
+    }
+  }
+
+  private async sendLoop(): Promise<void> {
+    if (this.isSendLoopRunning) return;
+    this.isSendLoopRunning = true;
+
+    try {
+      while (this.isConnected()) {
+        // Collect all active outgoing transfers
+        const activeIds = Array.from(this.outgoingTransfers.keys()).filter((id) => {
+          const t = this.outgoingTransfers.get(id);
+          return (
+            t &&
+            t.status === 'transferring' &&
+            !t.cancelled &&
+            !t.paused &&
+            t.offset < t.file.size
+          );
+        });
+
+        if (activeIds.length === 0) break;
+
+        // Respect WebRTC buffer backpressure
         if (this.dataChannel && this.dataChannel.bufferedAmount > HIGH_WATER_MARK) {
           await this.waitForBufferLow();
         }
 
-        if (this.activeTransfer.cancelled) break;
+        // Fair round-robin: Send 1 chunk from each active transfer per iteration
+        for (const id of activeIds) {
+          const transfer = this.outgoingTransfers.get(id);
+          if (
+            !transfer ||
+            transfer.status !== 'transferring' ||
+            transfer.cancelled ||
+            transfer.paused ||
+            transfer.offset >= transfer.file.size
+          ) {
+            continue;
+          }
 
-        const slice = file.slice(offset, offset + chunkSize);
-        const buffer = await slice.arrayBuffer();
+          if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+            break;
+          }
 
-        if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-          throw new Error('Connection lost during file transfer');
+          // Slice and encode binary packet
+          const slice = transfer.file.slice(transfer.offset, transfer.offset + transfer.chunkSize);
+          const chunkBuf = await slice.arrayBuffer();
+
+          const packet = encodeChunkPacket(transfer.id, transfer.currentChunkIndex, chunkBuf);
+          try {
+            this.dataChannel.send(packet);
+          } catch (err) {
+            console.warn('DataChannel send error:', err);
+            if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 50));
+            continue;
+          }
+
+          transfer.offset += chunkBuf.byteLength;
+          transfer.bytesTransferred += chunkBuf.byteLength;
+          transfer.currentChunkIndex++;
+
+          this.calculateOutgoingSpeed(transfer);
+          this.emitOutgoingProgress(transfer);
+
+          // Check if file fully transferred
+          if (transfer.offset >= transfer.file.size) {
+            transfer.status = 'completed';
+            this.sendControlMessage({
+              type: 'FILE_COMPLETE',
+              transferId: transfer.id,
+            });
+
+            const session = this.buildOutgoingSession(transfer);
+            this.callbacks.onTransferComplete?.(session);
+          }
+
+          // Micro backpressure check
+          if (this.dataChannel && this.dataChannel.bufferedAmount > HIGH_WATER_MARK) {
+            await this.waitForBufferLow();
+          }
         }
 
-        this.dataChannel.send(buffer);
-
-        offset += buffer.byteLength;
-        this.activeTransfer.bytesTransferred += buffer.byteLength;
-        fileEntry.progress = Math.min(100, Math.round((offset / file.size) * 100));
-
-        this.calculateSpeed();
-        this.emitProgressUpdate('transferring');
+        // Yield to event loop
+        await new Promise((r) => setTimeout(r, 0));
       }
-
-      if (this.activeTransfer.cancelled) break;
-
-      // File finished
-      fileEntry.status = 'completed';
-      fileEntry.progress = 100;
-      this.sendControlMessage({
-        type: 'FILE_COMPLETE',
-        payload: { transferId: this.activeTransfer.id, fileId: fileEntry.id },
-      });
-    }
-
-    if (!this.activeTransfer.cancelled) {
-      this.emitProgressUpdate('completed');
-      this.callbacks.onTransferComplete?.(this.activeTransfer.id, []);
+    } finally {
+      this.isSendLoopRunning = false;
     }
   }
 
@@ -543,185 +774,203 @@ export class WebRTCService {
     });
   }
 
-  // --- Receiving Flow ---
-
-  acceptIncomingTransfer(proposal: TransferProposalPayload): void {
-    if (!this.isConnected()) return;
-
-    this.activeTransfer = {
-      id: proposal.transferId,
-      direction: 'receive',
-      files: proposal.files.map((f) => ({
-        ...f,
-        status: 'pending' as const,
-        progress: 0,
-        receivedBytes: 0,
-        chunks: [],
-      })),
-      currentFileIndex: 0,
-      totalBytes: proposal.totalBytes,
-      bytesTransferred: 0,
-      startTime: Date.now(),
-      lastCalcTime: Date.now(),
-      lastCalcBytes: 0,
-      currentSpeedBps: 0,
-      cancelled: false,
-    };
-
-    this.sendControlMessage({
-      type: 'TRANSFER_ACCEPT',
-      payload: { transferId: proposal.transferId },
-    });
-
-    this.emitProgressUpdate('transferring');
-  }
-
-  rejectIncomingTransfer(proposal: TransferProposalPayload): void {
-    this.sendControlMessage({
-      type: 'TRANSFER_REJECT',
-      payload: { transferId: proposal.transferId },
-    });
-  }
-
-  private prepareToReceiveFile(header: FileHeaderPayload): void {
-    if (!this.activeTransfer || this.activeTransfer.cancelled) return;
-    const fileIndex = this.activeTransfer.files.findIndex((f) => f.id === header.fileId);
-    if (fileIndex !== -1) {
-      this.activeTransfer.currentFileIndex = fileIndex;
-      const file = this.activeTransfer.files[fileIndex];
-      file.status = 'transferring';
-      file.receivedBytes = 0;
-      file.chunks = [];
-    }
-    this.emitProgressUpdate('transferring');
-  }
+  // --- Receiving Chunks ---
 
   private handleBinaryChunk(buffer: ArrayBuffer): void {
-    if (!this.activeTransfer || this.activeTransfer.direction !== 'receive' || this.activeTransfer.cancelled) {
+    const packet = decodeChunkPacket(buffer);
+    if (!packet) return;
+
+    const { transferId, chunkIndex, data } = packet;
+    const incoming = this.incomingTransfers.get(transferId);
+    if (!incoming || incoming.cancelled || incoming.status === 'completed') return;
+
+    if (incoming.status === 'awaiting-approval') {
+      incoming.status = 'transferring';
+    }
+
+    incoming.chunks[chunkIndex] = data;
+    incoming.receivedBytes += data.byteLength;
+
+    this.calculateIncomingSpeed(incoming);
+    this.emitIncomingProgress(incoming);
+  }
+
+  private handleFileCompletedBySender(transferId: string): void {
+    const incoming = this.incomingTransfers.get(transferId);
+    if (!incoming || incoming.cancelled) return;
+
+    incoming.status = 'completed';
+
+    // Assemble file Blob
+    const blob = new Blob(incoming.chunks as BlobPart[], {
+      type: incoming.metadata.type || 'application/octet-stream',
+    });
+    incoming.blob = blob;
+    incoming.downloadUrl = URL.createObjectURL(blob);
+    // Free chunks memory
+    incoming.chunks = [];
+
+    const session = this.buildIncomingSession(incoming);
+    this.callbacks.onTransferComplete?.(session);
+  }
+
+  // --- Cancellation ---
+
+  cancelTransfer(transferId: string): void {
+    // Check outgoing
+    const outgoing = this.outgoingTransfers.get(transferId);
+    if (outgoing) {
+      outgoing.cancelled = true;
+      outgoing.status = 'cancelled';
+      this.sendControlMessage({
+        type: 'FILE_CANCEL',
+        transferId,
+      });
+      const session = this.buildOutgoingSession(outgoing);
+      this.callbacks.onTransferProgress?.(session);
       return;
     }
 
-    const currentFile = this.activeTransfer.files[this.activeTransfer.currentFileIndex];
-    if (!currentFile || !currentFile.chunks) return;
-
-    currentFile.chunks.push(new Uint8Array(buffer));
-    currentFile.receivedBytes = (currentFile.receivedBytes || 0) + buffer.byteLength;
-    this.activeTransfer.bytesTransferred += buffer.byteLength;
-
-    if (currentFile.size > 0) {
-      currentFile.progress = Math.min(100, Math.round((currentFile.receivedBytes / currentFile.size) * 100));
-    }
-
-    this.calculateSpeed();
-    this.emitProgressUpdate('transferring');
-  }
-
-  private async finalizeReceivedFile(fileId?: string): Promise<void> {
-    if (!this.activeTransfer || this.activeTransfer.cancelled) return;
-    
-    const fileIndex = fileId 
-      ? this.activeTransfer.files.findIndex((f) => f.id === fileId)
-      : this.activeTransfer.currentFileIndex;
-
-    if (fileIndex === -1) return;
-    const file = this.activeTransfer.files[fileIndex];
-
-    if (file && file.chunks) {
-      const blob = new Blob(file.chunks as BlobPart[], { type: file.type || 'application/octet-stream' });
-      file.blob = blob;
-      file.downloadUrl = URL.createObjectURL(blob);
-      file.status = 'completed';
-      file.progress = 100;
-      file.chunks = [];
-    }
-
-    const allCompleted = this.activeTransfer.files.every((f) => f.status === 'completed');
-    if (allCompleted) {
-      this.emitProgressUpdate('completed');
-      const received = this.activeTransfer.files.map((f) => ({
-        metadata: {
-          id: f.id,
-          name: f.name,
-          size: f.size,
-          type: f.type,
-          sha256: f.sha256,
-        },
-        blob: f.blob!,
-      }));
-      this.callbacks.onTransferComplete?.(this.activeTransfer.id, received);
-    } else {
-      this.emitProgressUpdate('transferring');
-    }
-  }
-
-  cancelTransfer(): void {
-    if (this.activeTransfer) {
-      this.activeTransfer.cancelled = true;
+    // Check incoming
+    const incoming = this.incomingTransfers.get(transferId);
+    if (incoming) {
+      incoming.cancelled = true;
+      incoming.status = 'cancelled';
+      incoming.chunks = [];
       this.sendControlMessage({
-        type: 'TRANSFER_CANCEL',
-        payload: { transferId: this.activeTransfer.id },
+        type: 'FILE_CANCEL',
+        transferId,
       });
-      this.emitProgressUpdate('cancelled');
-      this.activeTransfer = null;
+      const session = this.buildIncomingSession(incoming);
+      this.callbacks.onTransferProgress?.(session);
     }
   }
 
-  private calculateSpeed(): void {
-    if (!this.activeTransfer) return;
+  private handleFileCancelledByPeer(transferId: string): void {
+    const outgoing = this.outgoingTransfers.get(transferId);
+    if (outgoing) {
+      outgoing.cancelled = true;
+      outgoing.status = 'cancelled';
+      outgoing.error = 'Cancelled by peer';
+      const session = this.buildOutgoingSession(outgoing);
+      this.callbacks.onTransferProgress?.(session);
+      return;
+    }
+
+    const incoming = this.incomingTransfers.get(transferId);
+    if (incoming) {
+      incoming.cancelled = true;
+      incoming.status = 'cancelled';
+      incoming.error = 'Cancelled by peer';
+      incoming.chunks = [];
+      const session = this.buildIncomingSession(incoming);
+      this.callbacks.onTransferProgress?.(session);
+    }
+  }
+
+  private handleTransferError(transferId: string, error: string): void {
+    const outgoing = this.outgoingTransfers.get(transferId);
+    if (outgoing) {
+      outgoing.status = 'failed';
+      outgoing.error = error;
+      const session = this.buildOutgoingSession(outgoing);
+      this.callbacks.onTransferProgress?.(session);
+    }
+
+    const incoming = this.incomingTransfers.get(transferId);
+    if (incoming) {
+      incoming.status = 'failed';
+      incoming.error = error;
+      const session = this.buildIncomingSession(incoming);
+      this.callbacks.onTransferProgress?.(session);
+    }
+
+    this.callbacks.onTransferError?.(transferId, error);
+  }
+
+  // --- Speed & Progress Helpers ---
+
+  private calculateOutgoingSpeed(t: OutgoingFileState): void {
     const now = Date.now();
-    const elapsed = (now - this.activeTransfer.lastCalcTime) / 1000;
-
-    if (elapsed >= 0.4) {
-      const bytesDiff = this.activeTransfer.bytesTransferred - this.activeTransfer.lastCalcBytes;
-      const speed = bytesDiff / elapsed;
-      this.activeTransfer.currentSpeedBps = this.activeTransfer.currentSpeedBps === 0
-        ? speed
-        : this.activeTransfer.currentSpeedBps * 0.7 + speed * 0.3;
-
-      this.activeTransfer.lastCalcTime = now;
-      this.activeTransfer.lastCalcBytes = this.activeTransfer.bytesTransferred;
+    const elapsed = (now - t.lastCalcTime) / 1000;
+    if (elapsed >= 0.5) {
+      const bytes = t.bytesTransferred - t.lastCalcBytes;
+      t.currentSpeedBps = Math.round(bytes / elapsed);
+      t.lastCalcTime = now;
+      t.lastCalcBytes = t.bytesTransferred;
     }
   }
 
-  private emitProgressUpdate(status: TransferProgressState['status']): void {
-    if (!this.activeTransfer) return;
-
-    const currentFile = this.activeTransfer.files[this.activeTransfer.currentFileIndex];
-    const totalBytes = this.activeTransfer.totalBytes || 1;
-    const percentage = Math.min(100, Math.round((this.activeTransfer.bytesTransferred / totalBytes) * 100));
-
-    const remainingBytes = Math.max(0, totalBytes - this.activeTransfer.bytesTransferred);
-    const etaSeconds = this.activeTransfer.currentSpeedBps > 0 
-      ? Math.ceil(remainingBytes / this.activeTransfer.currentSpeedBps)
-      : 0;
-
-    const state: TransferProgressState = {
-      transferId: this.activeTransfer.id,
-      direction: this.activeTransfer.direction,
-      status,
-      currentFileIndex: this.activeTransfer.currentFileIndex,
-      totalFiles: this.activeTransfer.files.length,
-      currentFileName: currentFile ? currentFile.name : '',
-      currentFileSize: currentFile ? currentFile.size : 0,
-      bytesTransferred: this.activeTransfer.bytesTransferred,
-      totalBytes: this.activeTransfer.totalBytes,
-      speedBps: this.activeTransfer.currentSpeedBps,
-      etaSeconds,
-      percentage,
-      files: this.activeTransfer.files.map((f) => ({
-        id: f.id,
-        name: f.name,
-        size: f.size,
-        type: f.type,
-        status: f.status,
-        progress: f.progress,
-        downloadUrl: f.downloadUrl,
-        blob: f.blob,
-      })),
-    };
-
-    this.callbacks.onTransferProgress?.(state);
+  private calculateIncomingSpeed(t: IncomingFileState): void {
+    const now = Date.now();
+    const elapsed = (now - t.lastCalcTime) / 1000;
+    if (elapsed >= 0.5) {
+      const bytes = t.receivedBytes - t.lastCalcBytes;
+      t.currentSpeedBps = Math.round(bytes / elapsed);
+      t.lastCalcTime = now;
+      t.lastCalcBytes = t.receivedBytes;
+    }
   }
+
+  private buildOutgoingSession(t: OutgoingFileState): TransferSession {
+    const total = t.file.size || 1;
+    const progress = Math.min(100, Math.round((t.bytesTransferred / total) * 100));
+
+    return {
+      id: t.id,
+      direction: 'outgoing',
+      filename: t.metadata.name,
+      mimeType: t.metadata.type,
+      size: t.file.size,
+      status: t.status,
+      progress,
+      bytesTransferred: t.bytesTransferred,
+      speed: t.currentSpeedBps,
+      createdAt: t.startTime,
+      senderPeerId: this.localDevice?.id || '',
+      senderDeviceName: this.localDevice?.name || 'Local Device',
+      receiverPeerId: this.remoteDevice?.id || '',
+      receiverDeviceName: this.remoteDevice?.name || 'Peer Device',
+      error: t.error,
+    };
+  }
+
+  private buildIncomingSession(t: IncomingFileState): TransferSession {
+    const total = t.metadata.size || 1;
+    const progress = Math.min(100, Math.round((t.receivedBytes / total) * 100));
+
+    return {
+      id: t.id,
+      direction: 'incoming',
+      filename: t.metadata.name,
+      mimeType: t.metadata.type,
+      size: t.metadata.size,
+      status: t.status,
+      progress,
+      bytesTransferred: t.receivedBytes,
+      speed: t.currentSpeedBps,
+      createdAt: t.startTime,
+      senderPeerId: t.senderDevice.id,
+      senderDeviceName: t.senderDevice.name,
+      receiverPeerId: this.localDevice?.id || '',
+      receiverDeviceName: this.localDevice?.name || 'Local Device',
+      blob: t.blob,
+      downloadUrl: t.downloadUrl,
+      error: t.error,
+    };
+  }
+
+  private emitOutgoingProgress(t: OutgoingFileState): void {
+    const session = this.buildOutgoingSession(t);
+    this.callbacks.onTransferProgress?.(session);
+  }
+
+  private emitIncomingProgress(t: IncomingFileState): void {
+    const session = this.buildIncomingSession(t);
+    this.callbacks.onTransferProgress?.(session);
+  }
+
+  // --- Disconnection & Teardown ---
 
   disconnect(): void {
     this.stopPingPong();
@@ -757,7 +1006,9 @@ export class WebRTCService {
     }
 
     this.iceCandidateQueue = [];
-    this.activeTransfer = null;
+    this.outgoingTransfers.clear();
+    this.incomingTransfers.clear();
+    this.isSendLoopRunning = false;
   }
 }
 
