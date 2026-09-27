@@ -1,4 +1,5 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin } from 'vitest/config';
+
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import basicSsl from '@vitejs/plugin-basic-ssl';
@@ -121,4 +122,11 @@ export default defineConfig({
     quickdropSignalingPlugin(),
     ...(useHttps ? [basicSsl()] : []),
   ],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/__tests__/setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+    exclude: ['node_modules', 'dist'],
+  },
 });

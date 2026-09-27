@@ -34,7 +34,7 @@ export const TransferPage: React.FC = () => {
   const roomParam = searchParams.get('room');
   const actionParam = searchParams.get('action');
 
-  const { connectionState, setConnectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
+  const { connectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
   const { currentRoomId, setRoom, clearRoom } = useRoomStore();
   const {
     transfers,
@@ -135,7 +135,6 @@ export const TransferPage: React.FC = () => {
     resetConnection();
     resetAllTransfers();
     setSearchParams({});
-    setConnectionState('disconnected');
 
     showToast({
       type: 'info',

@@ -78,15 +78,26 @@ export const TransferCenter: React.FC<TransferCenterProps> = ({
   const handleDownload = (t: TransferSession) => {
     if (!t.blob && !t.downloadUrl) return;
 
-    const url = t.downloadUrl || (t.blob ? URL.createObjectURL(t.blob) : '');
-    if (!url) return;
-
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = t.filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    if (t.downloadUrl) {
+      // Use the pre-existing object URL (already managed by the transfer store)
+      const link = document.createElement('a');
+      link.href = t.downloadUrl;
+      link.download = t.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else if (t.blob) {
+      // Create a temporary URL, trigger download, then revoke immediately
+      const url = URL.createObjectURL(t.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = t.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      // Revoke after a short delay to allow the browser to start the download
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
   };
 
   return (
