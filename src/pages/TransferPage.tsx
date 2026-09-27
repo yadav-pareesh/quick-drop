@@ -34,7 +34,7 @@ export const TransferPage: React.FC = () => {
   const roomParam = searchParams.get('room');
   const actionParam = searchParams.get('action');
 
-  const { connectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
+  const { connectionState, setConnectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
   const { currentRoomId, setRoom, clearRoom } = useRoomStore();
   const {
     transfers,
