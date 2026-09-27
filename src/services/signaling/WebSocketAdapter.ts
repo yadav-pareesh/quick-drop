@@ -11,6 +11,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
   private localDevice: DeviceInfo | null = null;
   private reconnectTimer: number | null = null;
   private isExplicitlyClosed = false;
+  private isHost = false; // Track whether this client created or joined the room
 
   constructor(serverUrl: string) {
     this.serverUrl = serverUrl;
@@ -88,8 +89,9 @@ export class WebSocketAdapter implements ISignalingAdapter {
       if (!this.isExplicitlyClosed) {
         await this.connect().catch(() => {});
         if (this.currentRoomId && this.localDevice && this.isConnected()) {
+          // Send the correct message based on whether we created or joined the room
           this.send({
-            type: 'ROOM_JOINED',
+            type: this.isHost ? 'ROOM_CREATED' : 'ROOM_JOINED',
             roomId: this.currentRoomId,
             senderId: this.localDevice.id,
             senderDevice: this.localDevice,
@@ -123,6 +125,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
   async createRoom(roomId: string, deviceInfo: DeviceInfo): Promise<void> {
     this.currentRoomId = roomId;
     this.localDevice = deviceInfo;
+    this.isHost = true;
     if (!this.isConnected()) await this.connect();
     this.send({
       type: 'ROOM_CREATED',
@@ -135,6 +138,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
   async joinRoom(roomId: string, deviceInfo: DeviceInfo): Promise<void> {
     this.currentRoomId = roomId;
     this.localDevice = deviceInfo;
+    this.isHost = false;
     if (!this.isConnected()) await this.connect();
     this.send({
       type: 'ROOM_JOINED',

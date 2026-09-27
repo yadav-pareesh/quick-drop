@@ -29,14 +29,38 @@ export async function calculateSHA256(data: ArrayBuffer | Blob): Promise<string>
 
   try {
     let buffer: ArrayBuffer;
+
     if (data instanceof Blob) {
-      // For large files over 50MB, hash first 5MB + last 5MB + size to prevent freezing the UI thread
-      if (data.size > 50 * 1024 * 1024) {
-        const slice1 = await data.slice(0, 5 * 1024 * 1024).arrayBuffer();
-        const slice2 = await data.slice(data.size - 5 * 1024 * 1024).arrayBuffer();
-        const combined = new Uint8Array(slice1.byteLength + slice2.byteLength);
-        combined.set(new Uint8Array(slice1), 0);
-        combined.set(new Uint8Array(slice2), slice1.byteLength);
+      // For large files, read in chunks and yield to the event loop periodically
+      // to keep the UI responsive — but ALWAYS hash the FULL file.
+      const CHUNK = 8 * 1024 * 1024; // 8 MB read-at-a-time
+
+      if (data.size > CHUNK) {
+        // Use an array accumulation approach: read blob in slices to avoid
+        // a single massive arrayBuffer() call that can freeze the tab.
+        const parts: Uint8Array[] = [];
+        let offset = 0;
+
+        while (offset < data.size) {
+          const slice = data.slice(offset, offset + CHUNK);
+          const sliceBuf = await slice.arrayBuffer();
+          parts.push(new Uint8Array(sliceBuf));
+          offset += CHUNK;
+
+          // Yield to event loop every 32 MB to prevent UI freeze
+          if (offset % (32 * 1024 * 1024) === 0) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+
+        // Assemble the full buffer
+        const totalLength = parts.reduce((sum, p) => sum + p.byteLength, 0);
+        const combined = new Uint8Array(totalLength);
+        let pos = 0;
+        for (const part of parts) {
+          combined.set(part, pos);
+          pos += part.byteLength;
+        }
         buffer = combined.buffer;
       } else {
         buffer = await data.arrayBuffer();
