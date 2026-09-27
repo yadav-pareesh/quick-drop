@@ -5,8 +5,10 @@ import { MobileNav } from '../components/navigation/MobileNav';
 import { Footer } from '../components/navigation/Footer';
 import { ToastContainer } from '../components/common/Toast';
 import { useWebRTC } from '../hooks/useWebRTC';
+import { useTheme } from '../hooks/useTheme';
 
 export const RootLayout: React.FC = () => {
+  useTheme();
   useWebRTC();
 
   return (

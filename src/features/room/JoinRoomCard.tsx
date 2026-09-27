@@ -17,7 +17,7 @@ export const JoinRoomCard: React.FC<JoinRoomCardProps> = ({
   errorMessage,
   className = '',
 }) => {
-  const [inputCode, setInputCode] = useState('');
+  const [inputCode, setInputCode] = useState('QK-');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
 
@@ -81,6 +81,7 @@ export const JoinRoomCard: React.FC<JoinRoomCardProps> = ({
             className="w-full px-4 py-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white font-mono text-center text-xl sm:text-2xl font-bold tracking-widest uppercase placeholder:normal-case placeholder:text-base placeholder:tracking-normal placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
             autoComplete="off"
             autoCorrect="off"
+            autoFocus={true}
             spellCheck="false"
           />
         </div>
