@@ -1,0 +1,17 @@
+{
+  "name": "QuickDrop — Browser-to-Browser File Transfer",
+  "short_name": "QuickDrop",
+  "description": "Send files directly between devices without cloud storage using WebRTC",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
