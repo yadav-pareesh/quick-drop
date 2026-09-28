@@ -1,52 +1,69 @@
-const CACHE_NAME = 'quickdrop-shell-v1';
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/favicon.svg'
-];
+const CACHE_NAME = 'quickdrop-shell-v2';
 
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
-  );
+// Clean up old caches on activate
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
+    caches.keys().then((keys) =>
+      Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
             return caches.delete(key);
           }
         })
-      );
-    })
+      )
+    )
   );
   self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
-  // Only cache GET requests, avoid intercepting signaling or WebSockets
+  // Only handle GET requests and ignore WebSocket / non-http protocols
   if (event.request.method !== 'GET' || event.request.url.startsWith('ws')) {
     return;
   }
 
+  // Navigation requests (HTML pages): ALWAYS Network-First
+  // This ensures the browser always gets the latest index.html with up-to-date asset hashes
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() => {
+          return caches.match('/') || caches.match('/index.html');
+        })
+    );
+    return;
+  }
+
+  // Static assets (hashed JS, CSS, fonts, images): Cache-first with network fallback
   event.respondWith(
     caches.match(event.request).then((cached) => {
-      return (
-        cached ||
-        fetch(event.request).catch(() => {
-          // If offline and request is navigation, return cached shell
-          if (event.request.mode === 'navigate') {
-            return caches.match('/');
-          }
-        })
-      );
+      if (cached) return cached;
+
+      return fetch(event.request).then((response) => {
+        if (
+          response &&
+          response.status === 200 &&
+          event.request.url.startsWith(self.location.origin) &&
+          (event.request.url.includes('/assets/') ||
+            event.request.url.endsWith('.svg') ||
+            event.request.url.endsWith('.webmanifest'))
+        ) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      });
     })
   );
 });
