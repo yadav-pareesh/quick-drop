@@ -20,10 +20,22 @@ export class WebSocketAdapter implements ISignalingAdapter {
   }
 
   private resolveUrl(): string {
-    if (!this.serverUrl || this.serverUrl === 'ws://localhost:4000') {
-      return getDefaultSignalingUrl();
+    let url = this.serverUrl;
+    if (!url || url === 'ws://localhost:4000') {
+      url = getDefaultSignalingUrl();
     }
-    return this.serverUrl;
+    if (url) {
+      url = url.trim();
+      if (url.startsWith('https://')) {
+        url = 'wss://' + url.slice(8);
+      } else if (url.startsWith('http://')) {
+        url = 'ws://' + url.slice(7);
+      } else if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+        const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        url = `${proto}//${url}`;
+      }
+    }
+    return url;
   }
 
   setServerUrl(url: string): void {
