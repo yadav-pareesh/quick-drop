@@ -7,7 +7,7 @@ export function useSound() {
   const playTone = useCallback((freq: number, type: OscillatorType, duration: number, delay = 0) => {
     if (!settings.soundEnabled || typeof window === 'undefined') return;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
 

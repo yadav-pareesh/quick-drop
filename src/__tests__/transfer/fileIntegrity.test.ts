@@ -98,7 +98,6 @@ describe('File transfer integrity – chunk round-trip', () => {
   });
 
   it('handles a 0-byte (empty) file without errors', () => {
-    const transferId = 'tr_empty_001';
     const original = new ArrayBuffer(0);
     const chunks = chunkBuffer(original, DEFAULT_CHUNK_SIZE);
 

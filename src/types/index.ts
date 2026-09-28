@@ -70,23 +70,6 @@ export interface TransferSession {
   files?: Array<FileMetadata & { status: TransferItemStatus; progress: number; downloadUrl?: string; blob?: Blob }>;
 }
 
-export interface TransferProgressState {
-  transferId: string;
-  direction: 'send' | 'receive';
-  status: TransferStatus;
-  currentFileIndex: number;
-  totalFiles: number;
-  currentFileName: string;
-  currentFileSize: number;
-  bytesTransferred: number;
-  totalBytes: number;
-  speedBps: number;
-  etaSeconds: number;
-  percentage: number;
-  files: Array<FileMetadata & { status: TransferStatus; progress: number; downloadUrl?: string; blob?: Blob }>;
-  error?: string;
-}
-
 // Signaling Messages
 export type SignalingMessageType = 
   | 'ROOM_CREATED'
@@ -105,7 +88,12 @@ export interface SignalingMessage {
   roomId: string;
   senderId: string;
   senderDevice?: DeviceInfo;
-  payload?: any;
+  payload?: {
+    offer?: RTCSessionDescriptionInit;
+    answer?: RTCSessionDescriptionInit;
+    candidate?: RTCIceCandidateInit;
+    [key: string]: unknown;
+  };
 }
 
 // WebRTC DataChannel Protocol Messages
@@ -127,10 +115,22 @@ export type DataChannelMessageType =
   | 'PING'
   | 'PONG';
 
+export type DataChannelPayload =
+  | FileOfferPayload
+  | TextMessagePayload
+  | {
+      device?: DeviceInfo;
+      transferId?: string;
+      error?: string;
+      text?: string;
+      timestamp?: number;
+      [key: string]: unknown;
+    };
+
 export interface DataChannelMessage {
   type: DataChannelMessageType;
   transferId?: string;
-  payload?: any;
+  payload?: DataChannelPayload;
 }
 
 export interface FileOfferPayload {

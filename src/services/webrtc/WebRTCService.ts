@@ -45,6 +45,7 @@ interface OutgoingFileState {
   startTime: number;
   lastCalcTime: number;
   lastCalcBytes: number;
+  lastEmitTime?: number;
   currentSpeedBps: number;
   error?: string;
 }
@@ -61,6 +62,7 @@ interface IncomingFileState {
   startTime: number;
   lastCalcTime: number;
   lastCalcBytes: number;
+  lastEmitTime?: number;
   currentSpeedBps: number;
   cancelled: boolean;
   blob?: Blob;
@@ -361,18 +363,18 @@ export class WebRTCService {
   private handleControlMessage(msg: DataChannelMessage): void {
     switch (msg.type) {
       case 'HANDSHAKE':
-        if (msg.payload?.device) {
+        if (msg.payload && 'device' in msg.payload && msg.payload.device) {
           this.remoteDevice = msg.payload.device;
           this.callbacks.onConnectionStateChange?.('connected', this.remoteDevice || undefined);
           this.sendControlMessage({
             type: 'HANDSHAKE_ACK',
-            payload: { device: this.localDevice },
+            payload: { device: this.localDevice || undefined },
           });
         }
         break;
 
       case 'HANDSHAKE_ACK':
-        if (msg.payload?.device) {
+        if (msg.payload && 'device' in msg.payload && msg.payload.device) {
           this.remoteDevice = msg.payload.device;
           this.callbacks.onConnectionStateChange?.('connected', this.remoteDevice || undefined);
         }
@@ -380,47 +382,53 @@ export class WebRTCService {
 
       case 'FILE_OFFER':
       case 'TRANSFER_PROPOSAL':
-        this.handleIncomingFileOffer(msg.payload as FileOfferPayload);
+        if (msg.payload && 'files' in msg.payload) {
+          this.handleIncomingFileOffer(msg.payload as FileOfferPayload);
+        }
         break;
 
       case 'FILE_ACCEPT':
-      case 'TRANSFER_ACCEPT':
-        if (msg.transferId || msg.payload?.transferId) {
-          const tId = msg.transferId || msg.payload?.transferId;
+      case 'TRANSFER_ACCEPT': {
+        const tId = msg.transferId || (msg.payload && 'transferId' in msg.payload ? msg.payload.transferId : undefined);
+        if (tId) {
           this.handleFileAccepted(tId);
         }
         break;
+      }
 
       case 'FILE_REJECT':
-      case 'TRANSFER_REJECT':
-        if (msg.transferId || msg.payload?.transferId) {
-          const tId = msg.transferId || msg.payload?.transferId;
+      case 'TRANSFER_REJECT': {
+        const tId = msg.transferId || (msg.payload && 'transferId' in msg.payload ? msg.payload.transferId : undefined);
+        if (tId) {
           this.handleFileRejected(tId);
         }
         break;
+      }
 
-      case 'FILE_COMPLETE':
-        if (msg.transferId || msg.payload?.transferId) {
-          const tId = msg.transferId || msg.payload?.transferId;
+      case 'FILE_COMPLETE': {
+        const tId = msg.transferId || (msg.payload && 'transferId' in msg.payload ? msg.payload.transferId : undefined);
+        if (tId) {
           this.handleFileCompletedBySender(tId);
         }
         break;
+      }
 
-      case 'FILE_CANCEL':
-        if (msg.transferId || msg.payload?.transferId) {
-          const tId = msg.transferId || msg.payload?.transferId;
+      case 'FILE_CANCEL': {
+        const tId = msg.transferId || (msg.payload && 'transferId' in msg.payload ? msg.payload.transferId : undefined);
+        if (tId) {
           this.handleFileCancelledByPeer(tId);
         }
         break;
+      }
 
       case 'TRANSFER_ERROR':
-        if (msg.transferId && msg.payload?.error) {
+        if (msg.transferId && msg.payload && 'error' in msg.payload && typeof msg.payload.error === 'string') {
           this.handleTransferError(msg.transferId, msg.payload.error);
         }
         break;
 
       case 'TEXT_MESSAGE':
-        if (msg.payload) {
+        if (msg.payload && 'text' in msg.payload) {
           this.callbacks.onTextMessage?.(msg.payload as TextMessagePayload);
         }
         break;
@@ -616,7 +624,7 @@ export class WebRTCService {
       transferId,
     });
 
-    this.emitIncomingProgress(incoming);
+    this.emitIncomingProgress(incoming, true);
   }
 
   rejectIncomingTransfer(transferId: string): void {
@@ -642,7 +650,7 @@ export class WebRTCService {
     outgoing.startTime = Date.now();
     outgoing.lastCalcTime = Date.now();
 
-    this.emitOutgoingProgress(outgoing);
+    this.emitOutgoingProgress(outgoing, true);
     this.ensureSendLoop();
   }
 
@@ -960,12 +968,22 @@ export class WebRTCService {
     };
   }
 
-  private emitOutgoingProgress(t: OutgoingFileState): void {
+  private emitOutgoingProgress(t: OutgoingFileState, force = false): void {
+    const now = Date.now();
+    if (!force && t.lastEmitTime && now - t.lastEmitTime < 100) {
+      return;
+    }
+    t.lastEmitTime = now;
     const session = this.buildOutgoingSession(t);
     this.callbacks.onTransferProgress?.(session);
   }
 
-  private emitIncomingProgress(t: IncomingFileState): void {
+  private emitIncomingProgress(t: IncomingFileState, force = false): void {
+    const now = Date.now();
+    if (!force && t.lastEmitTime && now - t.lastEmitTime < 100) {
+      return;
+    }
+    t.lastEmitTime = now;
     const session = this.buildIncomingSession(t);
     this.callbacks.onTransferProgress?.(session);
   }
@@ -1007,6 +1025,17 @@ export class WebRTCService {
 
     this.iceCandidateQueue = [];
     this.outgoingTransfers.clear();
+
+    // Revoke all created Object URLs and release binary chunk memory
+    this.incomingTransfers.forEach((t) => {
+      if (t.downloadUrl) {
+        try {
+          URL.revokeObjectURL(t.downloadUrl);
+        } catch {}
+      }
+      t.chunks = [];
+      t.blob = undefined;
+    });
     this.incomingTransfers.clear();
     this.isSendLoopRunning = false;
   }

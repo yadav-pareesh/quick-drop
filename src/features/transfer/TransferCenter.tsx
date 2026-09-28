@@ -20,6 +20,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Button } from '../../components/common/Button';
+import { getFileCategory } from '../../services/file';
 
 interface TransferCenterProps {
   transfers: Record<string, TransferSession>;
@@ -31,31 +32,28 @@ interface TransferCenterProps {
 }
 
 const getFileIcon = (mimeType: string, filename: string) => {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-
-  if (mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
-    return <ImageIcon className="w-5 h-5 text-purple-500" />;
+  const category = getFileCategory(mimeType, filename);
+  switch (category) {
+    case 'image':
+      return <ImageIcon className="w-5 h-5 text-purple-500" />;
+    case 'video':
+      return <Film className="w-5 h-5 text-rose-500" />;
+    case 'audio':
+      return <Music className="w-5 h-5 text-amber-500" />;
+    case 'archive':
+      return <Archive className="w-5 h-5 text-emerald-500" />;
+    case 'code':
+      return <FileCode className="w-5 h-5 text-cyan-500" />;
+    case 'pdf':
+    case 'document':
+    case 'text':
+      return <FileText className="w-5 h-5 text-blue-500" />;
+    default:
+      return <FileIcon className="w-5 h-5 text-slate-500" />;
   }
-  if (mimeType.startsWith('video/') || ['mp4', 'mkv', 'mov', 'webm'].includes(ext)) {
-    return <Film className="w-5 h-5 text-rose-500" />;
-  }
-  if (mimeType.startsWith('audio/') || ['mp3', 'wav', 'flac', 'ogg', 'm4a'].includes(ext)) {
-    return <Music className="w-5 h-5 text-amber-500" />;
-  }
-  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) {
-    return <Archive className="w-5 h-5 text-emerald-500" />;
-  }
-  if (['js', 'ts', 'jsx', 'tsx', 'py', 'html', 'css', 'json', 'cpp', 'rs'].includes(ext)) {
-    return <FileCode className="w-5 h-5 text-cyan-500" />;
-  }
-  if (mimeType.includes('pdf') || ['pdf', 'doc', 'docx', 'txt', 'md'].includes(ext)) {
-    return <FileText className="w-5 h-5 text-blue-500" />;
-  }
-
-  return <FileIcon className="w-5 h-5 text-slate-500" />;
 };
 
-export const TransferCenter: React.FC<TransferCenterProps> = ({
+export const TransferCenter: React.FC<TransferCenterProps> = React.memo(({
   transfers,
   onAccept,
   onReject,
@@ -327,4 +325,6 @@ export const TransferCenter: React.FC<TransferCenterProps> = ({
       </div>
     </div>
   );
-};
+});
+
+TransferCenter.displayName = 'TransferCenter';

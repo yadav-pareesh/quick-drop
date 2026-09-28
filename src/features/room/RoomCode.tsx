@@ -47,8 +47,8 @@ export const RoomCode: React.FC<RoomCodeProps> = ({
           text: `Join my QuickDrop peer-to-peer file transfer with code: ${code}`,
           url,
         });
-      } catch (err: any) {
-        if (err.name !== 'AbortError') {
+      } catch (err: unknown) {
+        if (!(err instanceof Error && err.name === 'AbortError')) {
           handleCopy();
         }
       }

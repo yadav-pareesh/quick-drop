@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { FileMetadata, TransferSession, TransferProgressState } from '../types';
+import type { FileMetadata, TransferSession } from '../types';
 
 interface TransferStore {
   transfers: Record<string, TransferSession>;
@@ -18,18 +18,12 @@ interface TransferStore {
   appendSelectedFiles: (files: File[], metadata: FileMetadata[]) => void;
   removeSelectedFile: (fileId: string) => void;
   clearSelectedFiles: () => void;
-
-  // Legacy compat getters/setters
-  activeTransfer: TransferProgressState | null;
-  setActiveTransfer: (transfer: TransferProgressState | null) => void;
-  resetTransfer: () => void;
 }
 
 export const useTransferStore = create<TransferStore>((set) => ({
   transfers: {},
   selectedFiles: [],
   selectedFileMetadata: [],
-  activeTransfer: null,
 
   addTransfer: (session) =>
     set((state) => ({
@@ -91,7 +85,6 @@ export const useTransferStore = create<TransferStore>((set) => ({
         transfers: {},
         selectedFiles: [],
         selectedFileMetadata: [],
-        activeTransfer: null,
       };
     }),
 
@@ -134,20 +127,6 @@ export const useTransferStore = create<TransferStore>((set) => ({
       return {
         selectedFiles: [],
         selectedFileMetadata: [],
-      };
-    }),
-
-  setActiveTransfer: (transfer) => set({ activeTransfer: transfer }),
-
-  resetTransfer: () =>
-    set((state) => {
-      state.selectedFileMetadata.forEach((m) => {
-        if (m.previewUrl) URL.revokeObjectURL(m.previewUrl);
-      });
-      return {
-        selectedFiles: [],
-        selectedFileMetadata: [],
-        activeTransfer: null,
       };
     }),
 }));
