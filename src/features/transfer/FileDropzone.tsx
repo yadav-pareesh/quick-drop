@@ -11,7 +11,7 @@ interface FileDropzoneProps {
   className?: string;
 }
 
-export const FileDropzone: React.FC<FileDropzoneProps> = ({
+export const FileDropzone: React.FC<FileDropzoneProps> = React.memo(({
   onFilesSelected,
   onOpenSendText,
   disabled = false,
@@ -155,4 +155,6 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({
       )}
     </div>
   );
-};
+});
+
+FileDropzone.displayName = 'FileDropzone';

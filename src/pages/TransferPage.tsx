@@ -4,6 +4,7 @@ import { useConnectionStore } from '../stores/connectionStore';
 import { useRoomStore } from '../stores/roomStore';
 import { useTransferStore } from '../stores/transferStore';
 import { useToastStore } from '../stores/toastStore';
+import { useChatStore } from '../stores/chatStore';
 import { webrtcService } from '../services/webrtc';
 import { generateRoomCode } from '../services/crypto';
 import { processFileForTransfer } from '../services/file';
@@ -16,7 +17,7 @@ import { ConnectionStatus } from '../features/device/ConnectionStatus';
 import { FileDropzone } from '../features/transfer/FileDropzone';
 import { FileList } from '../features/transfer/FileList';
 import { TransferCenter } from '../features/transfer/TransferCenter';
-import { TextTransferModal } from '../features/transfer/TextTransferModal';
+import { ChatPanel } from '../features/transfer/ChatPanel';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { Button } from '../components/common/Button';
 
@@ -52,30 +53,123 @@ export const TransferPage: React.FC = () => {
     actionParam === 'join' || (roomParam && actionParam !== 'create') ? 'join' : 'create'
   );
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
-  const [isTextModalOpen, setIsTextModalOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [joinErrorMessage, setJoinErrorMessage] = useState<string | null>(null);
+
+  // Unread chat badge
+  const { messages: chatMessages } = useChatStore();
+  const [lastReadCount, setLastReadCount] = useState(0);
+  const unreadCount = isChatOpen ? 0 : Math.max(0, chatMessages.length - lastReadCount);
+  const handleChatRead = React.useCallback(() => {
+    setLastReadCount(chatMessages.length);
+  }, [chatMessages.length]);
+
+  // ── Guard ref to prevent auto-join re-triggering after Cancel ────────────
+  // Set to true when the user explicitly disconnects/cancels so the auto-join
+  // useEffect doesn't fire again the moment connectionState returns to 'idle'.
+  const isDisconnectingRef = React.useRef(false);
+
+  // ── Connection timeout ───────────────────────────────────────────────────
+  // If no peer responds within 60 seconds, auto-cancel and show a message.
+  const connectionTimeoutRef = React.useRef<number | null>(null);
+
+  const clearConnectionTimeout = React.useCallback(() => {
+    if (connectionTimeoutRef.current !== null) {
+      window.clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+  }, []);
+
+  const handleDisconnect = React.useCallback(() => {
+    // Set the guard FIRST so the auto-join effect doesn't re-trigger
+    isDisconnectingRef.current = true;
+    clearConnectionTimeout();
+
+    webrtcService.disconnect();
+    clearRoom();
+    resetConnection();        // immediately forces connectionState → 'idle' in the store
+    resetAllTransfers();
+    setSearchParams({});
+
+    showToast({
+      type: 'info',
+      title: 'Session Ended',
+      message: 'You have disconnected from the room.',
+    });
+
+    // Release the guard after one event-loop tick so the URL-param effect
+    // has already re-evaluated with the cleared params before we re-enable.
+    setTimeout(() => {
+      isDisconnectingRef.current = false;
+    }, 0);
+  }, [clearRoom, resetConnection, resetAllTransfers, setSearchParams, showToast, clearConnectionTimeout]);
 
   const handleJoinRoom = React.useCallback(async (code: string) => {
     setJoinErrorMessage(null);
     setRoom(code, false);
     setSearchParams({ room: code, action: 'join' });
+
+    // Start a 60-second connection timeout
+    clearConnectionTimeout();
+    connectionTimeoutRef.current = window.setTimeout(() => {
+      // Only fire if still in a connecting/joining state
+      const state = useConnectionStore.getState().connectionState;
+      if (state === 'joining_room' || state === 'connecting') {
+        showToast({
+          type: 'error',
+          title: 'Connection Timed Out',
+          message: 'No peer responded within 60 seconds. Make sure the host has the room open.',
+        });
+        handleDisconnect();
+      }
+    }, 60_000);
+
     try {
       await webrtcService.joinRoom(code, localDevice);
     } catch {
+      clearConnectionTimeout();
       setJoinErrorMessage('Failed to connect to room. Check code and try again.');
     }
-  }, [setRoom, setSearchParams, localDevice]);
+  }, [setRoom, setSearchParams, localDevice, showToast, clearConnectionTimeout, handleDisconnect]);
 
   // Auto-join if room query parameter present and user is joiner
   useEffect(() => {
+    // Don't re-trigger if the user just cancelled
+    if (isDisconnectingRef.current) return;
+
     if (roomParam && actionParam !== 'create' && connectionState === 'idle') {
       const code = normalizeRoomCode(roomParam);
       if (isValidRoomCode(code)) {
-        handleJoinRoom(code);
+        const timer = setTimeout(() => {
+          if (!isDisconnectingRef.current) {
+            void handleJoinRoom(code);
+          }
+        }, 0);
+        return () => clearTimeout(timer);
       }
     }
   }, [roomParam, actionParam, connectionState, handleJoinRoom]);
+
+  // Clear the timeout when we successfully connect or fully disconnect
+  useEffect(() => {
+    if (connectionState === 'connected' || connectionState === 'idle') {
+      clearConnectionTimeout();
+    }
+  }, [connectionState, clearConnectionTimeout]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => clearConnectionTimeout();
+  }, [clearConnectionTimeout]);
+
+  const isConnected = connectionState === 'connected' && remoteDevice !== null;
+  const isWaiting = connectionState === 'waiting_for_peer' || connectionState === 'creating_room';
+  const isConnecting = connectionState === 'connecting' || connectionState === 'joining_room';
+
+  const hasActiveTransfer = Object.values(transfers).some(
+    (t) => t.status === 'transferring'
+  );
 
   const handleCreateRoom = async () => {
     const code = generateRoomCode();
@@ -91,8 +185,6 @@ export const TransferPage: React.FC = () => {
       });
     }
   };
-
-
 
   const handleFilesSelected = async (newFiles: File[]) => {
     setIsProcessingFiles(true);
@@ -120,36 +212,14 @@ export const TransferPage: React.FC = () => {
         title: 'Transfer Started',
         message: `Offered ${selectedFiles.length} file(s) to ${remoteDevice.name}`,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       showToast({
         type: 'error',
         title: 'Transfer Error',
-        message: err.message || 'Could not initiate file transfer.',
+        message: err instanceof Error ? err.message : 'Could not initiate file transfer.',
       });
     }
   };
-
-  const handleDisconnect = () => {
-    webrtcService.disconnect();
-    clearRoom();
-    resetConnection();
-    resetAllTransfers();
-    setSearchParams({});
-
-    showToast({
-      type: 'info',
-      title: 'Session Ended',
-      message: 'You have disconnected from the room.',
-    });
-  };
-
-  const isConnected = connectionState === 'connected' && remoteDevice !== null;
-  const isWaiting = connectionState === 'waiting_for_peer' || connectionState === 'creating_room';
-  const isConnecting = connectionState === 'connecting' || connectionState === 'joining_room';
-
-  const hasActiveTransfer = Object.values(transfers).some(
-    (t) => t.status === 'transferring'
-  );
 
   return (
     <div className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-10">
@@ -161,14 +231,22 @@ export const TransferPage: React.FC = () => {
             <ConnectionStatus state={connectionState} latencyMs={peerLatency} />
 
             <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                leftIcon={<MessageSquare className="w-4 h-4" />}
-                onClick={() => setIsTextModalOpen(true)}
-              >
-                Send Note
-              </Button>
+              {/* Chat toggle with unread badge */}
+              <div className="relative">
+                <Button
+                  variant={isChatOpen ? 'primary' : 'secondary'}
+                  size="sm"
+                  leftIcon={<MessageSquare className="w-4 h-4" />}
+                  onClick={() => setIsChatOpen((v) => !v)}
+                >
+                  Chat
+                </Button>
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-blue-500 text-white text-[10px] font-bold flex items-center justify-center shadow-md shadow-blue-500/40 animate-bounce">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </div>
 
               <Button
                 variant="outline"
@@ -182,39 +260,55 @@ export const TransferPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Connection Visualizer */}
-          <ConnectionVisualizer
-            localDevice={localDevice}
-            remoteDevice={remoteDevice}
-            isTransferring={hasActiveTransfer}
-          />
-
-          {/* Unified Transfer Center (Independent Sessions, Direction Badges, Multi-File) */}
-          <TransferCenter
-            transfers={transfers}
-            onAccept={(id) => webrtcService.acceptIncomingTransfer(id)}
-            onReject={(id) => webrtcService.rejectIncomingTransfer(id)}
-            onCancel={(id) => webrtcService.cancelTransfer(id)}
-            onClearCompleted={clearCompletedTransfers}
-          />
-
-          {/* File Selection Dropzone & Staging (Always Available While Connected) */}
-          <div className="flex flex-col gap-6">
-            <FileDropzone
-              onFilesSelected={handleFilesSelected}
-              onOpenSendText={() => setIsTextModalOpen(true)}
-              disabled={isProcessingFiles}
-            />
-
-            {/* Selected Files Preview List */}
-            {selectedFileMetadata.length > 0 && (
-              <FileList
-                files={selectedFileMetadata}
-                onRemoveFile={removeSelectedFile}
-                onClearAll={clearSelectedFiles}
-                onSend={handleSendFiles}
-                isSending={isProcessingFiles}
+          {/* Main content: transfer UI + optional chat panel side-by-side */}
+          <div className="flex flex-col lg:flex-row gap-6">
+            {/* Left: transfer content */}
+            <div className="flex flex-col gap-6 flex-1 min-w-0">
+              {/* Connection Visualizer */}
+              <ConnectionVisualizer
+                localDevice={localDevice}
+                remoteDevice={remoteDevice}
+                isTransferring={hasActiveTransfer}
               />
+
+              {/* Unified Transfer Center */}
+              <TransferCenter
+                transfers={transfers}
+                onAccept={(id) => webrtcService.acceptIncomingTransfer(id)}
+                onReject={(id) => webrtcService.rejectIncomingTransfer(id)}
+                onCancel={(id) => webrtcService.cancelTransfer(id)}
+                onClearCompleted={clearCompletedTransfers}
+              />
+
+              {/* File Selection Dropzone & Staging */}
+              <div className="flex flex-col gap-6">
+                <FileDropzone
+                  onFilesSelected={handleFilesSelected}
+                  onOpenSendText={() => setIsChatOpen(true)}
+                  disabled={isProcessingFiles}
+                />
+
+                {selectedFileMetadata.length > 0 && (
+                  <FileList
+                    files={selectedFileMetadata}
+                    onRemoveFile={removeSelectedFile}
+                    onClearAll={clearSelectedFiles}
+                    onSend={handleSendFiles}
+                    isSending={isProcessingFiles}
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Right: Chat Panel (with constrained independent scroll & sticky behavior) */}
+            {isChatOpen && (
+              <div className="w-full lg:w-96 xl:w-[420px] shrink-0 h-[600px] max-h-[calc(100vh-140px)] lg:sticky lg:top-20 self-start">
+                <ChatPanel
+                  isOpen={isChatOpen}
+                  onClose={() => setIsChatOpen(false)}
+                  onRead={handleChatRead}
+                />
+              </div>
             )}
           </div>
         </div>
@@ -330,12 +424,6 @@ export const TransferPage: React.FC = () => {
         isDestructive={true}
         onConfirm={handleDisconnect}
         onCancel={() => setShowDisconnectConfirm(false)}
-      />
-
-      {/* Quick Text Transfer Modal */}
-      <TextTransferModal
-        isOpen={isTextModalOpen}
-        onClose={() => setIsTextModalOpen(false)}
       />
     </div>
   );

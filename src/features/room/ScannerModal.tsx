@@ -21,10 +21,20 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isInsecureContext, setIsInsecureContext] = useState(false);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
 
+  const isSecure = typeof window !== 'undefined' ? window.isSecureContext : true;
+  const hasMedia = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
+  const isInsecureContext = !isSecure && !hasMedia;
+
+  const defaultErrorMsg = isInsecureContext
+    ? 'Mobile browsers require HTTPS to access the live video camera directly. You can snap a photo with your camera shutter below or enter the code manually.'
+    : !hasMedia
+    ? 'Camera access is not supported on this browser or device.'
+    : null;
+
+  const activeError = errorMsg || defaultErrorMsg;
 
   const handleDetectedValue = useCallback(
     (raw: string) => {
@@ -48,27 +58,10 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     [onCodeScanned, onClose]
   );
 
-  // Check camera support & devices
+  // Check if device has multiple cameras (back / front)
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !hasMedia) return;
 
-    const isSecure = window.isSecureContext;
-    const hasMedia = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
-
-    if (!isSecure && !hasMedia) {
-      setIsInsecureContext(true);
-      setErrorMsg(
-        'Mobile browsers require HTTPS to access the live video camera directly. You can snap a photo with your camera shutter below or enter the code manually.'
-      );
-      return;
-    }
-
-    if (!hasMedia) {
-      setErrorMsg('Camera access is not supported on this browser or device.');
-      return;
-    }
-
-    // Check if device has multiple cameras (back / front)
     navigator.mediaDevices
       .enumerateDevices()
       .then((devices) => {
@@ -76,22 +69,16 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         setHasMultipleCameras(videoInputs.length > 1);
       })
       .catch(() => {});
-  }, [isOpen]);
+  }, [isOpen, hasMedia]);
 
   // Start live camera stream
   useEffect(() => {
-    if (!isOpen) return;
-
-    const isSecure = window.isSecureContext;
-    const hasMedia = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
-    if (!isSecure && !hasMedia) return;
+    if (!isOpen || !hasMedia || !isSecure) return;
 
     let stream: MediaStream | null = null;
     let scanAnimationId: number | null = null;
     let offscreenCanvas: HTMLCanvasElement | null = null;
     let offscreenCtx: CanvasRenderingContext2D | null = null;
-
-    setErrorMsg(null);
 
     navigator.mediaDevices
       .getUserMedia({
@@ -169,7 +156,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [isOpen, facingMode, handleDetectedValue]);
+  }, [isOpen, facingMode, handleDetectedValue, hasMedia, isSecure]);
 
   // Decode QR from uploaded / snapped image file
   const handleImageFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -197,7 +184,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             setErrorMsg('No QR code found in the image. Please make sure the code is in clear focus and try again.');
           }
         }
-      } catch (err) {
+      } catch {
         setErrorMsg('Failed to process image. Please try again.');
       } finally {
         URL.revokeObjectURL(objectUrl);
@@ -261,7 +248,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         )}
 
         {/* Live Camera Viewfinder (if supported) */}
-        {!isInsecureContext && !errorMsg && (
+        {!isInsecureContext && !activeError && (
           <div className="relative w-full aspect-square max-w-[270px] rounded-2xl overflow-hidden bg-slate-900 border-2 border-dashed border-blue-500/50 mb-4 flex items-center justify-center shadow-lg">
             <video
               ref={videoRef}
@@ -291,10 +278,10 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         )}
 
         {/* Error / Fallback Card */}
-        {errorMsg && !isInsecureContext && (
+        {activeError && !isInsecureContext && (
           <div className="w-full p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-rose-800 dark:text-rose-300 text-xs mb-4 text-center">
             <AlertCircle className="w-5 h-5 mx-auto mb-1.5 text-rose-500" />
-            <p className="mb-3">{errorMsg}</p>
+            <p className="mb-3">{activeError}</p>
             <div className="flex gap-2 justify-center">
               <Button
                 variant="outline"

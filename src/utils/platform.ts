@@ -85,7 +85,10 @@ export function checkBrowserCompatibility(): CompatibilityCheck {
     };
   }
 
-  const webRTC = !!(window.RTCPeerConnection || (window as any).webkitRTCPeerConnection);
+  const webRTC = !!(
+    window.RTCPeerConnection ||
+    (window as unknown as { webkitRTCPeerConnection?: typeof RTCPeerConnection }).webkitRTCPeerConnection
+  );
   const dataChannel = webRTC && typeof RTCPeerConnection.prototype.createDataChannel === 'function';
   const fileAPI = !!(window.File && window.FileReader && window.FileList && window.Blob);
   const indexedDB = !!window.indexedDB;

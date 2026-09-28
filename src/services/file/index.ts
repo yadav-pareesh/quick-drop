@@ -57,6 +57,20 @@ export function getFileCategory(mimeType: string, filename: string): FileCategor
   return 'generic';
 }
 
+/**
+ * Fast lossless compression heuristic:
+ * Determines if a file should undergo compression.
+ * Already-compressed multimedia & archives (JPEG, WebP, MP4, ZIP, etc.) return false.
+ */
+export function isCompressibleFile(mimeType: string, filename: string): boolean {
+  const category = getFileCategory(mimeType, filename);
+  if (category === 'text' || category === 'code') return true;
+  if (category === 'image' || category === 'video' || category === 'audio' || category === 'archive' || category === 'pdf') {
+    return false;
+  }
+  return false;
+}
+
 export async function processFileForTransfer(file: File): Promise<FileMetadata> {
   const sanitizedName = sanitizeFilename(file.name);
   const id = `file_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`;

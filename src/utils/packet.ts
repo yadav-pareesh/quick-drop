@@ -11,10 +11,11 @@
  */
 
 const CHUNK_MAGIC = 0x43; // 'C'
+const SHARED_ENCODER = new TextEncoder();
+const SHARED_DECODER = new TextDecoder();
 
 export function encodeChunkPacket(transferId: string, chunkIndex: number, chunkData: ArrayBuffer): ArrayBuffer {
-  const encoder = new TextEncoder();
-  const idBytes = encoder.encode(transferId);
+  const idBytes = SHARED_ENCODER.encode(transferId);
   const totalLength = 1 + 1 + idBytes.byteLength + 4 + chunkData.byteLength;
   const packet = new Uint8Array(totalLength);
   const view = new DataView(packet.buffer);
@@ -48,7 +49,7 @@ export function decodeChunkPacket(buffer: ArrayBuffer): {
   if (buffer.byteLength < 2 + idLen + 4) return null;
 
   const idBytes = new Uint8Array(buffer, 2, idLen);
-  const transferId = new TextDecoder().decode(idBytes);
+  const transferId = SHARED_DECODER.decode(idBytes);
   const chunkIndex = view.getUint32(2 + idLen, false);
   const data = new Uint8Array(buffer, 2 + idLen + 4);
 

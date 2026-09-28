@@ -15,9 +15,10 @@ export function isValidRoomCode(code: string): boolean {
 }
 
 export function sanitizeFilename(filename: string): string {
-  // Remove path traversal and illegal characters
+  // Remove path traversal and illegal control/filesystem characters
   return filename
     .replace(/[/\\]/g, '_')
+    // eslint-disable-next-line no-control-regex
     .replace(/[<>:"|?*\x00-\x1F]/g, '')
     .trim() || 'unnamed_file';
 }
