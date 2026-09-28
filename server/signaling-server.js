@@ -1,9 +1,14 @@
 /**
  * QuickDrop Standalone WebSocket Signaling Server
  * Usage:
- *   node server/signaling-server.js
- * 
+ *   node signaling-server.js
+ *
  * Zero-dependency room broadcaster using ws for cross-device WebRTC signaling.
+ *
+ * Origin Restriction:
+ *   Set ALLOWED_ORIGINS env var to a comma-separated list of allowed frontend origins.
+ *   Example: ALLOWED_ORIGINS=https://quickdrop.netlify.app,https://quickdrop.vercel.app
+ *   Leave unset (or set to *) to allow all origins (useful for local dev).
  */
 
 import http from 'http';
@@ -11,7 +16,33 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const PORT = process.env.PORT || 4000;
 
-// Setup basic HTTP server for health checks
+// ─── Origin validation ────────────────────────────────────────────────────────
+// Parse the ALLOWED_ORIGINS env var into a Set for O(1) lookup.
+// If unset or set to "*", all origins are allowed (open mode).
+const rawAllowed = process.env.ALLOWED_ORIGINS || '*';
+const ALLOWED_ORIGINS =
+  rawAllowed.trim() === '*'
+    ? null // null = allow all
+    : new Set(
+        rawAllowed
+          .split(',')
+          .map((o) => o.trim().toLowerCase())
+          .filter(Boolean)
+      );
+
+function isOriginAllowed(origin) {
+  if (!ALLOWED_ORIGINS) return true;        // open mode
+  if (!origin) return false;                // no Origin header → reject in restricted mode
+  return ALLOWED_ORIGINS.has(origin.toLowerCase());
+}
+
+if (ALLOWED_ORIGINS) {
+  console.log(`[QuickDrop] Origin restriction ENABLED. Allowed: ${[...ALLOWED_ORIGINS].join(', ')}`);
+} else {
+  console.log('[QuickDrop] Origin restriction DISABLED (ALLOWED_ORIGINS=*)');
+}
+
+// ─── HTTP server (health check) ───────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   res.writeHead(200, {
     'Content-Type': 'application/json',
@@ -20,10 +51,24 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({ status: 'ok', service: 'QuickDrop Signaling Server' }));
 });
 
-// Rooms state: roomId -> Set of WebSocket clients
+// ─── Rooms state: roomId → Set of WebSocket clients ──────────────────────────
 const rooms = new Map();
 
-const wss = new WebSocketServer({ server });
+// ─── WebSocket Server with origin validation ──────────────────────────────────
+const wss = new WebSocketServer({
+  server,
+  // verifyClient fires during the HTTP→WS upgrade handshake,
+  // BEFORE the connection is established. Return false to reject.
+  verifyClient({ origin, req }, callback) {
+    if (!isOriginAllowed(origin)) {
+      console.warn(`[QuickDrop] Rejected connection from disallowed origin: "${origin}" (${req.socket.remoteAddress})`);
+      // 403 status code, with a reason string shown in browser devtools
+      callback(false, 403, 'Forbidden: Origin not allowed');
+    } else {
+      callback(true);
+    }
+  },
+});
 
 wss.on('connection', (ws, req) => {
   let clientRoomId = null;
