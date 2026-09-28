@@ -1,6 +1,7 @@
 import type { DeviceInfo, SignalingMessage } from '../../types';
 import type { ISignalingAdapter, SignalingMessageHandler } from './types';
-import { getDefaultSignalingUrl } from '../../constants';
+import { getDefaultSignalingUrl, isLikelyStaticHost } from '../../constants';
+import { useConnectionStore } from '../../stores/connectionStore';
 
 export class WebSocketAdapter implements ISignalingAdapter {
   public name = 'WebSocket Server';
@@ -12,6 +13,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
   private reconnectTimer: number | null = null;
   private isExplicitlyClosed = false;
   private isHost = false; // Track whether this client created or joined the room
+  private retryCount = 0;
 
   constructor(serverUrl: string) {
     this.serverUrl = serverUrl;
@@ -27,6 +29,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
   setServerUrl(url: string): void {
     if (this.serverUrl !== url) {
       this.serverUrl = url;
+      this.retryCount = 0;
       if (this.isConnected()) {
         this.disconnect();
         this.connect().catch(console.error);
@@ -36,6 +39,20 @@ export class WebSocketAdapter implements ISignalingAdapter {
 
   isConnected(): boolean {
     return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+  }
+
+  private checkSignalingFailure(targetUrl: string): void {
+    if (this.retryCount >= 2 && !this.isExplicitlyClosed) {
+      if (isLikelyStaticHost() && targetUrl.includes('/quickdrop-ws')) {
+        useConnectionStore.getState().setSignalingError(
+          'Static hosting (Netlify/Vercel) cannot run WebSockets. To transfer cross-device, please configure your deployed signaling server URL in Settings.'
+        );
+      } else {
+        useConnectionStore.getState().setSignalingError(
+          `Unable to reach WebSocket signaling server at ${targetUrl}. Please ensure your signaling server is running.`
+        );
+      }
+    }
   }
 
   async connect(): Promise<void> {
@@ -50,8 +67,9 @@ export class WebSocketAdapter implements ISignalingAdapter {
       try {
         this.socket = new WebSocket(targetUrl);
 
-
         this.socket.onopen = () => {
+          this.retryCount = 0;
+          useConnectionStore.getState().setSignalingError(null);
           resolve();
         };
 
@@ -68,16 +86,22 @@ export class WebSocketAdapter implements ISignalingAdapter {
         this.socket.onclose = () => {
           this.socket = null;
           if (!this.isExplicitlyClosed) {
+            this.retryCount++;
+            this.checkSignalingFailure(targetUrl);
             this.scheduleReconnect();
           }
           resolve();
         };
 
         this.socket.onerror = () => {
+          this.retryCount++;
+          this.checkSignalingFailure(targetUrl);
           resolve();
         };
       } catch (err) {
         console.warn('WebSocket connection error:', err);
+        this.retryCount++;
+        this.checkSignalingFailure(targetUrl);
         resolve();
       }
     });
@@ -85,6 +109,8 @@ export class WebSocketAdapter implements ISignalingAdapter {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
+    // Exponential backoff between 1.5s and 10s to avoid hammering the network
+    const delay = Math.min(1500 * Math.pow(1.5, Math.min(this.retryCount, 5)), 10000);
     this.reconnectTimer = window.setTimeout(async () => {
       if (!this.isExplicitlyClosed) {
         await this.connect().catch(() => {});
@@ -98,7 +124,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
           });
         }
       }
-    }, 1500);
+    }, delay);
   }
 
   private send(msg: SignalingMessage): void {
@@ -109,6 +135,7 @@ export class WebSocketAdapter implements ISignalingAdapter {
 
   disconnect(): void {
     this.isExplicitlyClosed = true;
+    this.retryCount = 0;
     if (this.reconnectTimer) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
