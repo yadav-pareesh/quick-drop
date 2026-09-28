@@ -1,10 +1,11 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Zap, Lock, Mail } from 'lucide-react';
+import { Zap, Lock, Mail, Globe } from 'lucide-react';
 import { APP_NAME } from '../../constants';
 
 const DEVELOPER = {
   name: 'Pareesh Yadav',
+  portfolio: 'https://pareeshyadav.xyz',
   github: 'https://www.github.com/yadav-pareesh',
   linkedin: 'https://www.linkedin.com/in/pareeshyadav',
   email: 'mailto:pareeshyadav@gmail.com',
@@ -46,9 +47,19 @@ export const Footer: React.FC = () => {
             </Link>
           </div>
 
-          {/* Developer Social Links */}
+          {/* Developer Social & Portfolio Links */}
           <div className="flex items-center gap-2">
             <span className="text-slate-400 dark:text-slate-500 mr-1 hidden sm:inline">Developer:</span>
+            <a
+              href={DEVELOPER.portfolio}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Developer Portfolio"
+              title="Portfolio Website (pareeshyadav.xyz)"
+              className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Globe className="w-4 h-4" />
+            </a>
             <a
               href={DEVELOPER.github}
               target="_blank"
@@ -94,7 +105,7 @@ export const Footer: React.FC = () => {
           <span>
             Developed by{' '}
             <a
-              href={DEVELOPER.github}
+              href={DEVELOPER.portfolio}
               target="_blank"
               rel="noopener noreferrer"
               className="font-medium text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 underline transition-colors"
