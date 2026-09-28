@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import { useConnectionStore } from '../stores/connectionStore';
 import { useRoomStore } from '../stores/roomStore';
 import { useTransferStore } from '../stores/transferStore';
@@ -27,7 +27,9 @@ import {
   LogOut,
   MessageSquare,
   ShieldCheck,
-  RefreshCw
+  RefreshCw,
+  AlertTriangle,
+  Settings
 } from 'lucide-react';
 
 export const TransferPage: React.FC = () => {
@@ -35,7 +37,7 @@ export const TransferPage: React.FC = () => {
   const roomParam = searchParams.get('room');
   const actionParam = searchParams.get('action');
 
-  const { connectionState, localDevice, remoteDevice, peerLatency, resetConnection } = useConnectionStore();
+  const { connectionState, localDevice, remoteDevice, peerLatency, resetConnection, signalingError } = useConnectionStore();
   const { currentRoomId, setRoom, clearRoom } = useRoomStore();
   const {
     transfers,
@@ -315,6 +317,24 @@ export const TransferPage: React.FC = () => {
       ) : isWaiting && currentRoomId ? (
         /* Host waiting for device */
         <div className="flex flex-col items-center gap-6">
+          {signalingError && (
+            <div className="max-w-md w-full p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-left text-xs leading-relaxed flex flex-col gap-2">
+              <div className="flex items-center gap-1.5 font-bold text-amber-800 dark:text-amber-200">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                <span>Signaling Server Warning</span>
+              </div>
+              <p>{signalingError}</p>
+              <div className="flex items-center gap-2 mt-1">
+                <Link
+                  to="/settings"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-100 font-semibold text-xs transition-colors"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Configure in Settings</span>
+                </Link>
+              </div>
+            </div>
+          )}
           <CreateRoomCard roomId={currentRoomId} className="w-full" />
           <Button
             variant="ghost"
@@ -337,6 +357,26 @@ export const TransferPage: React.FC = () => {
           <p className="text-sm text-slate-500 dark:text-slate-400 mb-6 leading-relaxed">
             Exchanging WebRTC handshake signals. Transfer will begin once peer confirms.
           </p>
+
+          {signalingError && (
+            <div className="mb-6 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-left text-xs leading-relaxed flex flex-col gap-2">
+              <div className="flex items-center gap-1.5 font-bold text-amber-800 dark:text-amber-200">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                <span>Signaling Server Unreachable</span>
+              </div>
+              <p>{signalingError}</p>
+              <div className="flex items-center gap-2 mt-1">
+                <Link
+                  to="/settings"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-100 font-semibold text-xs transition-colors"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Configure in Settings</span>
+                </Link>
+              </div>
+            </div>
+          )}
+
           <Button variant="outline" onClick={handleDisconnect} className="w-full">
             Cancel
           </Button>

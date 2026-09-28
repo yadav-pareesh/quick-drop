@@ -32,7 +32,24 @@ export const STORAGE_KEYS = {
   THEME: 'quickdrop_theme',
 } as const;
 
+export const isLikelyStaticHost = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host.endsWith('.netlify.app') ||
+    host.endsWith('.vercel.app') ||
+    host.endsWith('.github.io') ||
+    host.endsWith('.pages.dev') ||
+    host.endsWith('.firebaseapp.com') ||
+    host.endsWith('.web.app')
+  );
+};
+
 export const getDefaultSignalingUrl = (): string => {
+  const envUrl = import.meta.env?.VITE_SIGNALING_SERVER_URL;
+  if (typeof envUrl === 'string' && envUrl.trim()) {
+    return envUrl.trim();
+  }
   if (typeof window === 'undefined') return 'ws://localhost:5173/quickdrop-ws';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/quickdrop-ws`;
