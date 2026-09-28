@@ -1,0 +1,16 @@
+{
+  "name": "quickdrop-signaling-server",
+  "version": "1.0.0",
+  "description": "QuickDrop WebSocket Signaling Server for cross-device WebRTC coordination",
+  "type": "module",
+  "main": "signaling-server.js",
+  "scripts": {
+    "start": "node signaling-server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}
